@@ -834,15 +834,13 @@ let pnlChart = null, ivrankChart = null;
 
 async function loadDashboard() {
     try {
-        const [summary, pnlData, ivData, posData] = await Promise.all([
+        const [summary, ivData, posData] = await Promise.all([
             api('/api/analytics/summary'),
-            api('/api/analytics/pnl'),
             api('/api/analytics/ivrank?symbols=IWM,SPY,QQQ,AAPL,TSLA,NVDA'),
             api('/api/positions')
         ]);
 
         const s = summary.data;
-        const openCount = posData.data.positions ? posData.data.positions.length : 0;
         // Net Liquidation (live Webull account value)
         $('kpi-total-pnl').textContent = `$${fmt(s.netLiquidation)}`;
         $('kpi-total-pnl').style.color = 'var(--green)';
@@ -857,20 +855,35 @@ async function loadDashboard() {
         $('kpi-pf').textContent = (s.profitFactor || 0).toFixed(2);
         $('kpi-expectancy-sub').textContent = `${s.closedTrades} trades · Win ${s.winRate}%`;
 
-        renderPnlChart(pnlData.data);
         renderIvRankChart(ivData.data);
         renderDashPositions(posData.data.positions);
         renderDashHistory(posData.data.history);
+
+        // Save today's snapshot to DB (non-blocking), then load chart from DB
+        fetch('/api/analytics/snapshot', { method: 'POST' })
+            .then(() => api('/api/analytics/pnl-history?days=90'))
+            .then(r => renderPnlChart(r.data, 'db'))
+            .catch(() =>
+                // DB unavailable — fall back to local trade history
+                api('/api/analytics/pnl').then(r => renderPnlChart(r.data, 'local'))
+            );
     } catch (e) { console.error('[Dashboard]', e); }
 }
 
-function renderPnlChart(points) {
+function renderPnlChart(points, source = 'local') {
     const ctx = $('pnl-chart').getContext('2d');
-    const labels = points.map(p => p.date);
-    const values = points.map(p => p.cumulative);
+    const labels = points.map(p => p.date ? p.date.split('T')[0] : p.date);
+    // DB rows have netLiquidation; local rows have cumulative realized P&L
+    const values = points.map(p => source === 'db' ? p.netLiquidation : p.cumulative);
     const last = values[values.length - 1] || 0;
-    $('pnl-chart-badge').textContent = `${last >= 0 ? '+' : ''}$${fmt(last)}`;
-    $('pnl-chart-badge').className = `badge ${last >= 0 ? 'badge-green' : 'badge-red'}`;
+    const first = values[0] || 0;
+    const change = last - first;
+    $('pnl-chart-badge').textContent = source === 'db'
+        ? `$${fmt(last)}`
+        : `${change >= 0 ? '+' : ''}$${fmt(change)}`;
+    $('pnl-chart-badge').className = `badge ${change >= 0 || source === 'db' ? 'badge-green' : 'badge-red'}`;
+    const cardTitle = document.querySelector('#view-dashboard .card-title');
+    if (cardTitle) cardTitle.textContent = source === 'db' ? 'Daily Net Liquidation' : 'Cumulative P&L';
     if (pnlChart) pnlChart.destroy();
     pnlChart = new Chart(ctx, {
         type: 'line',

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const webull = require('../services/webullService');
+const db = require('../services/dbService');
 
 // GET /api/analytics/summary — live account KPIs from Webull
 router.get('/summary', async (req, res) => {
@@ -115,6 +116,43 @@ router.get('/greeks', async (req, res) => {
             }
         });
     } catch (err) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+// POST /api/analytics/snapshot — save today's balance to DB (idempotent)
+router.post('/snapshot', async (req, res) => {
+    try {
+        const balanceResult = await webull.getAccountBalance();
+        if (!balanceResult) return res.status(503).json({ ok: false, error: 'Balance unavailable' });
+
+        const usd = (balanceResult.account_currency_assets || []).find(a => a.currency === 'USD') || {};
+        const today = new Date().toISOString().split('T')[0];
+
+        await db.upsertSnapshot({
+            date:           today,
+            netLiquidation: parseFloat(usd.net_liquidation_value || balanceResult.total_net_liquidation_value || 0),
+            marketValue:    parseFloat(usd.market_value || balanceResult.total_market_value || 0),
+            cashBalance:    parseFloat(usd.cash_balance || balanceResult.total_cash_balance || 0),
+            unrealizedPnl:  parseFloat(usd.unrealized_profit_loss || balanceResult.total_unrealized_profit_loss || 0),
+            buyingPower:    parseFloat(usd.option_buying_power || 0)
+        });
+
+        res.json({ ok: true, date: today });
+    } catch (err) {
+        console.error('[Snapshot]', err.message);
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+// GET /api/analytics/pnl-history?days=90 — daily net liquidation series from DB
+router.get('/pnl-history', async (req, res) => {
+    try {
+        const days = parseInt(req.query.days) || 90;
+        const rows = await db.getPnlHistory(days);
+        res.json({ ok: true, data: rows });
+    } catch (err) {
+        console.error('[PnL History]', err.message);
         res.status(500).json({ ok: false, error: err.message });
     }
 });
