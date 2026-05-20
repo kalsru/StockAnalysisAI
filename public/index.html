@@ -298,6 +298,107 @@ tbody td:first-child, tbody td.text-left { text-align: left; }
 .iv-rank-low { background: var(--green); }
 .iv-rank-med { background: var(--yellow); }
 .iv-rank-high { background: var(--red); }
+
+/* ─── Mobile bottom nav ─── */
+#mobile-nav {
+    display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
+    background: var(--panel); border-top: 1px solid var(--border);
+    height: 56px; padding: 0;
+}
+.mobile-nav-inner { display: flex; height: 100%; }
+.mobile-nav-btn {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 2px; border: none; background: none;
+    color: var(--text2); font-size: 0.6rem; font-weight: 600; cursor: pointer;
+    padding: 6px 2px; transition: color 0.15s; font-family: var(--font);
+    overflow: hidden; min-width: 0;
+}
+.mobile-nav-btn span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-nav-btn svg { width: 18px; height: 18px; flex-shrink: 0; }
+.mobile-nav-btn.active { color: var(--accent2); }
+.mobile-nav-btn.active svg { stroke: var(--accent2); }
+
+/* ─── Responsive — Tablet (≤900px) ─── */
+@media (max-width: 900px) {
+    .grid-4 { grid-template-columns: 1fr 1fr; }
+    .metrics-row { grid-template-columns: 1fr 1fr; }
+}
+
+/* ─── Responsive — Mobile (≤768px) ─── */
+@media (max-width: 768px) {
+    html { font-size: 13px; }
+    body { overflow: auto; height: auto; min-height: 100dvh; }
+    #main { overflow: visible; }
+    .view { padding: 12px 12px 68px; }
+
+    /* Header: hide desktop nav, shrink */
+    #header { padding: 0 12px; height: 48px; gap: 8px; }
+    #nav { display: none; }
+    .market-status { display: none; }
+    .clock { font-size: 0.72rem; }
+    .logo { font-size: 0.9rem; }
+    .logo svg { width: 16px; height: 16px; }
+
+    /* Ticker bar */
+    .ticker-item { padding: 0 10px; font-size: 0.72rem; gap: 5px; }
+
+    /* Mobile nav visible */
+    #mobile-nav { display: flex; }
+
+    /* Grids collapse */
+    .grid-4 { grid-template-columns: 1fr 1fr; gap: 10px; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .grid-3 { grid-template-columns: 1fr 1fr; gap: 10px; }
+
+    /* KPI cards */
+    .kpi { padding: 12px 14px; }
+    .kpi-value { font-size: 1.25rem; }
+
+    /* Toolbar wraps */
+    .toolbar { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+    .toolbar > div { flex: 1 1 calc(50% - 8px); min-width: 0; }
+    .toolbar input, .toolbar select { width: 100% !important; }
+    .toolbar .btn { width: 100%; justify-content: center; margin-top: 0 !important; }
+    #chain-price-display { font-size: 1.1rem; }
+
+    /* Positions view: stack chat below positions table */
+    #view-positions > div[style*="display:flex"],
+    #view-positions > div { flex-direction: column !important; }
+    .pos-chat-panel {
+        width: 100% !important; position: static !important;
+        height: 420px; margin-top: 16px;
+    }
+
+    /* Analysis metrics */
+    .metrics-row { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .metric-box { padding: 10px 12px; }
+
+    /* Cards */
+    .card { padding: 12px; }
+    .analysis-card { padding: 14px; }
+    .analysis-card .strategy-name { font-size: 1.05rem; }
+
+    /* Section headings */
+    .section-title { font-size: 0.75rem; }
+}
+
+/* ─── Responsive — Small phone (≤480px) ─── */
+@media (max-width: 480px) {
+    .grid-4 { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .grid-3 { grid-template-columns: 1fr; }
+    .kpi-value { font-size: 1.1rem; }
+    .kpi { padding: 10px 12px; }
+    .kpi-label { font-size: 0.65rem; }
+
+    /* Ticker: hide last 2 tickers */
+    .ticker-item:nth-child(n+5) { display: none; }
+
+    /* Screener filter form */
+    .filter-form { grid-template-columns: 1fr; }
+
+    /* Analysis: single col metrics on very small */
+    .metrics-row { grid-template-columns: 1fr 1fr; }
+}
 </style>
 </head>
 <body>
@@ -681,11 +782,12 @@ async function api(url, opts={}) {
 // ────────────────────────────────────────────────
 function switchView(name) {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.nav-btn, .mobile-nav-btn').forEach(b => b.classList.remove('active'));
     $(`view-${name}`).classList.add('active');
-    document.querySelector(`[data-view="${name}"]`).classList.add('active');
+    document.querySelectorAll(`[data-view="${name}"]`).forEach(b => b.classList.add('active'));
     if (name === 'positions') loadPositions();
     if (name === 'dashboard') loadDashboard();
+    window.scrollTo(0, 0);
 }
 
 // ────────────────────────────────────────────────
@@ -1490,5 +1592,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadChain('IWM');
 });
 </script>
+
+<!-- Mobile bottom navigation -->
+<div id="mobile-nav">
+    <div class="mobile-nav-inner">
+        <button class="mobile-nav-btn active" onclick="switchView('dashboard')" data-view="dashboard">
+            <i data-lucide="layout-dashboard"></i>
+            <span>Dashboard</span>
+        </button>
+        <button class="mobile-nav-btn" onclick="switchView('chain')" data-view="chain">
+            <i data-lucide="table"></i>
+            <span>Chain</span>
+        </button>
+        <button class="mobile-nav-btn" onclick="switchView('positions')" data-view="positions">
+            <i data-lucide="briefcase"></i>
+            <span>Positions</span>
+        </button>
+        <button class="mobile-nav-btn" onclick="switchView('screener')" data-view="screener">
+            <i data-lucide="filter"></i>
+            <span>Screener</span>
+        </button>
+        <button class="mobile-nav-btn" onclick="switchView('analysis')" data-view="analysis">
+            <i data-lucide="brain"></i>
+            <span>AI</span>
+        </button>
+    </div>
+</div>
 </body>
 </html>
