@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Secrets — never commit these
+.env
+.env.local
+conf/token.txt
+
+# Runtime data (personal positions data)
+data/positions.json

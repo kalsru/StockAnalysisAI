@@ -1,0 +1,19 @@
+{
+  "name": "webull-options-analyzer",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google-cloud/vertexai": "^1.12.0",
+    "axios": "^1.16.1",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  }
+}
