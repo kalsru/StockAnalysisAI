@@ -39,6 +39,14 @@ class WebullService {
     }
 
     _loadCredentials() {
+        // Env vars take priority (production); fall back to local token.txt (dev)
+        if (process.env.WEBULL_DID && process.env.WEBULL_ACCESS_TOKEN) {
+            this.did = process.env.WEBULL_DID;
+            this.userId = process.env.WEBULL_USER_ID || '';
+            this.accessToken = process.env.WEBULL_ACCESS_TOKEN;
+            this.accountId = 'P6HOL7BRA6U2AVL0F680BATI48';
+            return;
+        }
         try {
             const lines = fs.readFileSync(path.join(__dirname, '../conf/token.txt'), 'utf8').trim().split('\n').map(l => l.trim());
             this.did = lines[0] || '';

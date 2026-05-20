@@ -299,6 +299,16 @@ tbody td:first-child, tbody td.text-left { text-align: left; }
 .iv-rank-med { background: var(--yellow); }
 .iv-rank-high { background: var(--red); }
 
+/* ─── History tabs ─── */
+.history-tab {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--text2); font-size: 0.78rem; font-weight: 600; cursor: pointer;
+    padding: 8px 16px; display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font); transition: color 0.15s; margin-bottom: -1px;
+}
+.history-tab:hover { color: var(--text); }
+.history-tab-active { color: var(--accent2); border-bottom-color: var(--accent2); }
+
 /* ─── Mobile bottom nav ─── */
 #mobile-nav {
     display: none; position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
@@ -570,7 +580,14 @@ tbody td:first-child, tbody td.text-left { text-align: left; }
             <div id="positions-open-wrap" class="table-wrap" style="margin-bottom:24px">
                 <div class="loading-overlay"><div class="spinner"></div></div>
             </div>
-            <div class="section-title" style="margin-bottom:12px"><i data-lucide="history" style="width:15px;height:15px"></i> Trade History</div>
+            <div style="display:flex;align-items:center;gap:0;margin-bottom:12px;border-bottom:1px solid var(--border)">
+                <button id="tab-closed" class="history-tab history-tab-active" onclick="switchHistoryTab('closed')">
+                    <i data-lucide="history" style="width:13px;height:13px"></i> Closed Trades
+                </button>
+                <button id="tab-daily" class="history-tab" onclick="switchHistoryTab('daily')">
+                    <i data-lucide="bar-chart-2" style="width:13px;height:13px"></i> Daily P&amp;L
+                </button>
+            </div>
             <div id="positions-history-wrap" class="table-wrap">
                 <div class="loading-overlay"><div class="spinner"></div></div>
             </div>
@@ -1075,15 +1092,69 @@ document.addEventListener('DOMContentLoaded', () => {
 // ────────────────────────────────────────────────
 //  POSITIONS
 // ────────────────────────────────────────────────
+let _closedHistory = [];
+let _activeHistoryTab = 'closed';
+
 async function loadPositions() {
     $('positions-open-wrap').innerHTML = '<div class="loading-overlay"><div class="spinner"></div></div>';
     $('positions-history-wrap').innerHTML = '<div class="loading-overlay"><div class="spinner"></div></div>';
     try {
         const r = await api('/api/positions');
         _chatPositions = r.data.positions || [];
+        _closedHistory = r.data.history || [];
         renderOpenPositions(r.data.positions);
-        renderHistoryPositions(r.data.history);
+        switchHistoryTab(_activeHistoryTab);
     } catch (e) { toast(e.message, 'error'); }
+}
+
+function switchHistoryTab(tab) {
+    _activeHistoryTab = tab;
+    document.getElementById('tab-closed').className = 'history-tab' + (tab === 'closed' ? ' history-tab-active' : '');
+    document.getElementById('tab-daily').className  = 'history-tab' + (tab === 'daily'  ? ' history-tab-active' : '');
+    if (tab === 'closed') {
+        renderHistoryPositions(_closedHistory);
+    } else {
+        $('positions-history-wrap').innerHTML = '<div class="loading-overlay"><div class="spinner"></div><span>Loading...</span></div>';
+        api('/api/analytics/pnl-history?days=90')
+            .then(r => renderDailyPnl(r.data))
+            .catch(() => {
+                $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">Daily P&L history not available yet — data builds up each day as the dashboard loads.</div>';
+            });
+    }
+}
+
+function renderDailyPnl(rows) {
+    if (!rows || !rows.length) {
+        $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">No daily P&L records yet. Data will appear after the dashboard is loaded each trading day.</div>';
+        return;
+    }
+    // rows are oldest-first; compute day-over-day change
+    const tableRows = rows.map((r, i) => {
+        const prev = i > 0 ? rows[i - 1].netLiquidation : r.netLiquidation;
+        const dayChange = r.netLiquidation - prev;
+        const dayChangePct = prev !== 0 ? (dayChange / prev * 100) : 0;
+        const date = (r.date || '').split('T')[0];
+        return `<tr>
+            <td class="text-left">${date}</td>
+            <td style="font-weight:700;font-variant-numeric:tabular-nums">$${fmt(r.netLiquidation)}</td>
+            <td style="color:${pnlColor(dayChange)};font-weight:700">${i === 0 ? '--' : (dayChange >= 0 ? '+' : '') + '$' + fmt(dayChange)}</td>
+            <td style="color:${pnlColor(dayChange)}">${i === 0 ? '--' : (dayChangePct >= 0 ? '+' : '') + dayChangePct.toFixed(2) + '%'}</td>
+            <td style="color:var(--text3);font-size:0.75rem">$${fmt(r.marketValue)}</td>
+            <td style="color:var(--text3);font-size:0.75rem">$${fmt(r.unrealizedPnl >= 0 ? r.unrealizedPnl : r.unrealizedPnl)}</td>
+        </tr>`;
+    }).reverse().join('');   // show newest first
+    $('positions-history-wrap').innerHTML = `
+        <table>
+            <thead><tr>
+                <th class="text-left">Date</th>
+                <th>Net Liq.</th>
+                <th>Day Change</th>
+                <th>Day %</th>
+                <th>Mkt Value</th>
+                <th>Unrealized P&L</th>
+            </tr></thead>
+            <tbody>${tableRows}</tbody>
+        </table>`;
 }
 
 function renderOpenPositions(positions) {

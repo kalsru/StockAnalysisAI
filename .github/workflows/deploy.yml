@@ -66,7 +66,16 @@ jobs:
             az containerapp update \
               --name $CONTAINER_APP_NAME \
               --resource-group $CONTAINER_APP_RG \
-              --image $ACR_REGISTRY/$IMAGE_NAME:${{ github.sha }}
+              --image $ACR_REGISTRY/$IMAGE_NAME:${{ github.sha }} \
+              --set-env-vars \
+                ANTHROPIC_API_KEY=secretref:anthropic-key \
+                WEBULL_API_KEY=secretref:webull-api-key \
+                WEBULL_SECRET_KEY=secretref:webull-secret-key \
+                WEBULL_API_URL=secretref:webull-api-url \
+                WEBULL_DID=secretref:webull-did \
+                WEBULL_USER_ID=secretref:webull-user-id \
+                WEBULL_ACCESS_TOKEN=secretref:webull-access-token \
+                AZURE_SQL_CONNECTION_STRING=secretref:sql-conn
           fi
 
       - name: Print app URL
