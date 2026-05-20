@@ -1,0 +1,77 @@
+name: Build & Deploy to Azure Container Apps
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  ACR_REGISTRY: investairegistry.azurecr.io
+  IMAGE_NAME: invest-ai
+  CONTAINER_APP_NAME: invest-ai-app
+  CONTAINER_APP_RG: speaker-roster-rg
+  CONTAINER_APP_ENV: speaker-roster-env
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: az acr login --name investairegistry
+
+      - name: Build & push image
+        run: |
+          docker build -t $ACR_REGISTRY/$IMAGE_NAME:${{ github.sha }} \
+                       -t $ACR_REGISTRY/$IMAGE_NAME:latest .
+          docker push $ACR_REGISTRY/$IMAGE_NAME:${{ github.sha }}
+          docker push $ACR_REGISTRY/$IMAGE_NAME:latest
+
+      - name: Deploy to Container Apps
+        run: |
+          # Create app if it doesn't exist, else update
+          EXISTS=$(az containerapp show --name $CONTAINER_APP_NAME \
+            --resource-group $CONTAINER_APP_RG --query name -o tsv 2>/dev/null || echo "")
+          if [ -z "$EXISTS" ]; then
+            az containerapp create \
+              --name $CONTAINER_APP_NAME \
+              --resource-group $CONTAINER_APP_RG \
+              --environment $CONTAINER_APP_ENV \
+              --image $ACR_REGISTRY/$IMAGE_NAME:${{ github.sha }} \
+              --registry-server $ACR_REGISTRY \
+              --registry-username ${{ secrets.ACR_USERNAME }} \
+              --registry-password ${{ secrets.ACR_PASSWORD }} \
+              --target-port 8080 \
+              --ingress external \
+              --min-replicas 0 \
+              --max-replicas 2 \
+              --cpu 0.5 --memory 1.0Gi \
+              --env-vars \
+                ANTHROPIC_API_KEY=secretref:anthropic-key \
+                WEBULL_API_KEY=secretref:webull-api-key \
+                WEBULL_SECRET_KEY=secretref:webull-secret-key \
+                WEBULL_API_URL=secretref:webull-api-url \
+              --secrets \
+                anthropic-key="${{ secrets.ANTHROPIC_API_KEY }}" \
+                webull-api-key="${{ secrets.WEBULL_API_KEY }}" \
+                webull-secret-key="${{ secrets.WEBULL_SECRET_KEY }}" \
+                webull-api-url="${{ secrets.WEBULL_API_URL }}"
+          else
+            az containerapp update \
+              --name $CONTAINER_APP_NAME \
+              --resource-group $CONTAINER_APP_RG \
+              --image $ACR_REGISTRY/$IMAGE_NAME:${{ github.sha }}
+          fi
+
+      - name: Print app URL
+        run: |
+          URL=$(az containerapp show --name $CONTAINER_APP_NAME \
+            --resource-group $CONTAINER_APP_RG \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "App deployed at: https://$URL"
