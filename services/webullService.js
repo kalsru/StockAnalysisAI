@@ -3,210 +3,192 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// Normal CDF for Black-Scholes Greeks
+// ─── Black-Scholes (for options chain fallback only) ───────────────────────
 function normCdf(x) {
     const t = 1 / (1 + 0.2316419 * Math.abs(x));
     const d = 0.3989422820 * Math.exp(-x * x / 2);
     let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.7814779 + t * (-1.8212560 + t * 1.3302744))));
     return x > 0 ? 1 - p : p;
 }
-
-function normPdf(x) {
-    return Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI);
-}
-
+function normPdf(x) { return Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI); }
 function blackScholes(S, K, T, r, sigma, type) {
-    if (T <= 0 || sigma <= 0) return { price: Math.max(0, type === 'call' ? S - K : K - S), delta: type === 'call' ? 1 : -1, gamma: 0, theta: 0, vega: 0, iv: sigma };
+    if (T <= 0 || sigma <= 0) return { price: Math.max(0, type === 'call' ? S - K : K - S), delta: type === 'call' ? 1 : -1, gamma: 0, theta: 0, vega: 0 };
     const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
     const d2 = d1 - sigma * Math.sqrt(T);
     const phi = normPdf(d1);
     let price, delta;
-    if (type === 'call') {
-        price = S * normCdf(d1) - K * Math.exp(-r * T) * normCdf(d2);
-        delta = normCdf(d1);
-    } else {
-        price = K * Math.exp(-r * T) * normCdf(-d2) - S * normCdf(-d1);
-        delta = normCdf(d1) - 1;
-    }
-    const gamma = phi / (S * sigma * Math.sqrt(T));
-    const theta = (-(S * phi * sigma) / (2 * Math.sqrt(T)) - r * K * Math.exp(-r * T) * normCdf(type === 'call' ? d2 : -d2)) / 365;
-    const vega = S * phi * Math.sqrt(T) / 100;
-    return { price: Math.max(0, price), delta: parseFloat(delta.toFixed(4)), gamma: parseFloat(gamma.toFixed(5)), theta: parseFloat(theta.toFixed(4)), vega: parseFloat(vega.toFixed(4)), iv: sigma };
+    if (type === 'call') { price = S * normCdf(d1) - K * Math.exp(-r * T) * normCdf(d2); delta = normCdf(d1); }
+    else { price = K * Math.exp(-r * T) * normCdf(-d2) - S * normCdf(-d1); delta = normCdf(d1) - 1; }
+    return {
+        price: Math.max(0, price),
+        delta: parseFloat(delta.toFixed(4)),
+        gamma: parseFloat((phi / (S * sigma * Math.sqrt(T))).toFixed(5)),
+        theta: parseFloat(((-(S * phi * sigma) / (2 * Math.sqrt(T)) - r * K * Math.exp(-r * T) * normCdf(type === 'call' ? d2 : -d2)) / 365).toFixed(4)),
+        vega: parseFloat((S * phi * Math.sqrt(T) / 100).toFixed(4))
+    };
 }
 
 class WebullService {
     constructor() {
-        this.apiKey = process.env.WEBULL_API_KEY;
-        this.secretKey = process.env.WEBULL_SECRET_KEY;
-        this.apiUrl = `https://${process.env.WEBULL_API_URL || 'quotes-gw.webull.com'}`;
-        this.quotesUrl = 'https://quotes-gw.webull.com/api';
-        this._loadCredentials();
-        this._tickerCache = {};
+        this.BASE = 'https://api.webull.com';
+        this.appKey = process.env.WEBULL_API_KEY;
+        this.appSecret = process.env.WEBULL_SECRET_KEY;
         this._quoteCache = {};
-        this._cacheTTL = 10000; // 10s for quotes
+        this._cacheTTL = 15000;
+        this._loadCredentials();
     }
 
     _loadCredentials() {
         try {
-            const tokenPath = path.join(__dirname, '../conf/token.txt');
-            const lines = fs.readFileSync(tokenPath, 'utf8').trim().split('\n');
-            this.did = (lines[0] || '').trim();
-            this.userId = (lines[1] || '').trim();
-            this.accountType = (lines[2] || 'NORMAL').trim();
+            const lines = fs.readFileSync(path.join(__dirname, '../conf/token.txt'), 'utf8').trim().split('\n').map(l => l.trim());
+            this.did = lines[0] || '';
+            this.userId = lines[1] || '';
+            this.accessToken = lines[3] || '';
+            this.accountId = 'P6HOL7BRA6U2AVL0F680BATI48';
         } catch {
-            this.did = 'd12fcc94521540dd906c94bee3209507';
-            this.userId = '1780393541256';
-            this.accountType = 'NORMAL';
+            this.did = ''; this.userId = ''; this.accessToken = ''; this.accountId = '';
         }
     }
 
-    _sign(timestamp) {
-        return crypto
-            .createHmac('sha256', this.secretKey || '')
-            .update(this.apiKey + timestamp)
-            .digest('base64');
-    }
-
-    _authHeaders() {
-        const timestamp = Date.now().toString();
-        return {
-            'api-key': this.apiKey,
-            'timestamp': timestamp,
-            'sign': this._sign(timestamp),
-            'did': this.did,
-            'hl': 'en',
-            'os': 'web',
-            'platform': 'web',
-            'ver': '3.40.11',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Referer': 'https://app.webull.com/',
-            'Origin': 'https://app.webull.com'
+    _sign(path, queryParams, headers, body) {
+        const sigParams = {
+            'host': 'api.webull.com',
+            'x-app-key': headers['x-app-key'],
+            'x-signature-algorithm': headers['x-signature-algorithm'],
+            'x-signature-nonce': headers['x-signature-nonce'],
+            'x-signature-version': headers['x-signature-version'],
+            'x-timestamp': headers['x-timestamp'],
+            ...queryParams
         };
-    }
-
-    async getTickerId(symbol) {
-        const sym = symbol.toUpperCase();
-        if (this._tickerCache[sym]) return this._tickerCache[sym];
-        try {
-            const res = await axios.get(`${this.quotesUrl}/search/pc/tickers`, {
-                params: { keyword: sym, pageIndex: 1, pageSize: 20 },
-                headers: this._authHeaders(),
-                timeout: 5000
-            });
-            const tickers = res.data?.data || [];
-            const match = tickers.find(t => t.ticker?.symbol === sym && t.ticker?.listStatus === 1);
-            const id = match?.ticker?.tickerId || null;
-            if (id) this._tickerCache[sym] = id;
-            return id;
-        } catch {
-            return null;
+        const str1 = Object.keys(sigParams).sort().map(k => `${k}=${sigParams[k]}`).join('&');
+        let str3 = `${path}&${str1}`;
+        if (body && Object.keys(body).length > 0) {
+            str3 += '&' + crypto.createHash('md5').update(JSON.stringify(body)).digest('hex').toUpperCase();
         }
+        return crypto.createHmac('sha1', this.appSecret + '&').update(encodeURIComponent(str3)).digest('base64');
     }
 
+    _headers(apiPath, query = {}, body = null) {
+        const ts = new Date().toISOString().split('.')[0] + 'Z';
+        const nonce = crypto.randomBytes(16).toString('hex');
+        const h = {
+            'x-app-key': this.appKey,
+            'x-timestamp': ts,
+            'x-signature-algorithm': 'HMAC-SHA1',
+            'x-signature-version': '1.0',
+            'x-signature-nonce': nonce,
+            'x-version': 'v2',
+            'x-access-token': this.accessToken,
+            'Content-Type': 'application/json'
+        };
+        h['x-signature'] = this._sign(apiPath, query, h, body);
+        return h;
+    }
+
+    async _get(apiPath, query = {}) {
+        const res = await axios.get(this.BASE + apiPath, {
+            params: query,
+            headers: this._headers(apiPath, query),
+            timeout: 10000
+        });
+        return res.data;
+    }
+
+    async _post(apiPath, body = {}) {
+        const res = await axios.post(this.BASE + apiPath, body, {
+            headers: this._headers(apiPath, {}, body),
+            timeout: 10000
+        });
+        return res.data;
+    }
+
+    // ─── Quote (Yahoo Finance — fast & reliable for market data) ────────────
     async getQuote(symbol) {
         const sym = symbol.toUpperCase();
         const cached = this._quoteCache[sym];
         if (cached && Date.now() - cached.ts < this._cacheTTL) return cached.data;
-
-        const basePrices = { IWM: 218.45, SPY: 528.37, QQQ: 452.91, AAPL: 189.52, TSLA: 174.83, NVDA: 875.43, AMZN: 185.67, MSFT: 415.22 };
-        const basePrice = basePrices[sym] || 150 + Math.random() * 200;
-
         try {
-            const tickerId = await this.getTickerId(sym);
-            if (!tickerId) throw new Error('No ticker ID');
-
-            const res = await axios.get(`${this.quotesUrl}/quote/tickerRealTimes/v5/${tickerId}`, {
-                headers: this._authHeaders(),
-                timeout: 5000
+            const res = await axios.get(`https://query1.finance.yahoo.com/v8/finance/chart/${sym}`, {
+                params: { interval: '1d', range: '1d' },
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                timeout: 6000
             });
-            const d = res.data;
-            const price = parseFloat(d?.close || d?.lastPrice || d?.preClose || basePrice);
+            const m = res.data?.chart?.result?.[0]?.meta;
+            if (!m?.regularMarketPrice) throw new Error('No data');
+            const price = parseFloat(m.regularMarketPrice);
+            const prev = parseFloat(m.chartPreviousClose || price);
+            const change = parseFloat((price - prev).toFixed(2));
             const result = {
-                symbol: sym,
-                price,
-                change: parseFloat(d?.change || 0),
-                changeRatio: parseFloat(d?.changeRatio || 0),
-                open: parseFloat(d?.open || price),
-                high: parseFloat(d?.high || price * 1.01),
-                low: parseFloat(d?.low || price * 0.99),
-                volume: parseInt(d?.volume || 0),
-                source: 'live'
+                symbol: sym, price, change,
+                changeRatio: parseFloat((change / prev).toFixed(5)),
+                open: parseFloat(m.regularMarketOpen || price),
+                high: parseFloat(m.regularMarketDayHigh || price),
+                low: parseFloat(m.regularMarketDayLow || price),
+                volume: parseInt(m.regularMarketVolume || 0),
+                source: 'yahoo'
             };
             this._quoteCache[sym] = { data: result, ts: Date.now() };
             return result;
         } catch {
-            const change = (Math.random() - 0.48) * 4;
-            const result = {
-                symbol: sym,
-                price: parseFloat((basePrice + change).toFixed(2)),
-                change: parseFloat(change.toFixed(2)),
-                changeRatio: parseFloat((change / basePrice).toFixed(5)),
-                open: parseFloat((basePrice - 0.5).toFixed(2)),
-                high: parseFloat((basePrice + 2.1).toFixed(2)),
-                low: parseFloat((basePrice - 1.8).toFixed(2)),
-                volume: Math.floor(25000000 + Math.random() * 15000000),
-                source: 'mock'
-            };
+            const fallback = { IWM: 273.00, SPY: 587.50, QQQ: 478.20, AAPL: 211.45, TSLA: 342.80, NVDA: 1085.60, AMZN: 224.30, MSFT: 448.70 };
+            const base = fallback[sym] || 150;
+            const change = parseFloat(((Math.random() - 0.48) * base * 0.01).toFixed(2));
+            const result = { symbol: sym, price: parseFloat((base + change).toFixed(2)), change, changeRatio: parseFloat((change / base).toFixed(5)), open: base, high: parseFloat((base * 1.005).toFixed(2)), low: parseFloat((base * 0.995).toFixed(2)), volume: 0, source: 'fallback' };
             this._quoteCache[sym] = { data: result, ts: Date.now() };
             return result;
         }
     }
 
+    // ─── Expiry dates (Webull securitiesapi — works with DID) ────────────────
     async getOptionExpiryDates(symbol) {
-        try {
-            const tickerId = await this.getTickerId(symbol.toUpperCase());
-            if (!tickerId) throw new Error('No ticker ID');
-            const res = await axios.get(`${this.quotesUrl}/quote/option/expireDateList/${tickerId}`, {
-                headers: this._authHeaders(),
-                timeout: 5000
-            });
-            const dates = res.data || [];
-            if (dates.length > 0) return { tickerId, dates, source: 'live' };
-            throw new Error('Empty dates');
-        } catch {
-            return { tickerId: null, dates: this._mockExpiryDates(), source: 'mock' };
+        const tickerIds = { IWM: 913354523, SPY: 913243251, QQQ: 913323997, AAPL: 913254235, TSLA: 913255598, NVDA: 913323846, AMZN: 913245571, MSFT: 913315119 };
+        const tickerId = tickerIds[symbol.toUpperCase()];
+        if (tickerId) {
+            try {
+                const res = await axios.get(`https://securitiesapi.webull.com/api/quote/option/expireDateList/${tickerId}`, {
+                    headers: { 'did': this.did, 'hl': 'en', 'os': 'web', 'platform': 'web', 'ver': '3.40.11', 'User-Agent': 'Mozilla/5.0' },
+                    timeout: 6000
+                });
+                if (res.data?.length > 0) return { tickerId, dates: res.data, source: 'webull' };
+            } catch { /* fall through */ }
         }
+        return { tickerId: tickerId || null, dates: this._mockExpiryDates(), source: 'mock' };
     }
 
     _mockExpiryDates() {
-        const dates = [];
         const now = new Date();
-        const fridays = [];
         const d = new Date(now);
         d.setDate(d.getDate() + (5 - d.getDay() + 7) % 7 || 7);
-        for (let i = 0; i < 12; i++) {
-            fridays.push(d.toISOString().split('T')[0]);
-            d.setDate(d.getDate() + 7);
-        }
-        // Add monthly expirations (3rd Friday)
+        const dates = [];
+        for (let i = 0; i < 12; i++) { dates.push(d.toISOString().split('T')[0]); d.setDate(d.getDate() + 7); }
         for (let m = 0; m < 6; m++) {
             const md = new Date(now.getFullYear(), now.getMonth() + m + 1, 1);
             md.setDate(md.getDate() + (5 - md.getDay() + 7) % 7 + 14);
             const ds = md.toISOString().split('T')[0];
-            if (!fridays.includes(ds)) fridays.push(ds);
+            if (!dates.includes(ds)) dates.push(ds);
         }
-        return fridays.sort();
+        return dates.sort();
     }
 
+    // ─── Options chain ────────────────────────────────────────────────────────
     async getOptionChain(symbol, expireDate = null) {
         const sym = symbol.toUpperCase();
-        const quote = await this.getQuote(sym);
+        const [quote, { tickerId, dates }] = await Promise.all([this.getQuote(sym), this.getOptionExpiryDates(sym)]);
         const S = quote.price;
-        const { tickerId, dates, source } = await this.getOptionExpiryDates(sym);
         const selectedExpiry = expireDate || dates[2] || dates[0];
 
-        if (tickerId && source === 'live') {
+        if (tickerId) {
             try {
-                const res = await axios.get(`${this.quotesUrl}/quote/option/chain/query/${tickerId}`, {
+                const res = await axios.get(`https://securitiesapi.webull.com/api/quote/option/chain/query/${tickerId}`, {
                     params: { count: 200, direction: 'all', expireDate: selectedExpiry },
-                    headers: this._authHeaders(),
+                    headers: { 'did': this.did, 'hl': 'en', 'os': 'web', 'platform': 'web', 'ver': '3.40.11', 'User-Agent': 'Mozilla/5.0' },
                     timeout: 8000
                 });
                 const raw = res.data?.data || res.data || [];
-                if (raw.length > 0) {
-                    return this._normalizeChain(raw, sym, S, selectedExpiry, dates, 'live');
+                if (Array.isArray(raw) && raw.length > 0) {
+                    return this._normalizeChain(raw, sym, S, selectedExpiry, dates, 'webull');
                 }
-            } catch { /* fall through to mock */ }
+            } catch { /* fall through */ }
         }
 
         return this._generateMockChain(sym, S, selectedExpiry, dates);
@@ -215,103 +197,142 @@ class WebullService {
     _normalizeChain(raw, symbol, underlyingPrice, expiry, expiryDates, source) {
         const rows = raw.map(row => ({
             strike: parseFloat(row.strikePrice || row.call?.strikePrice || 0),
-            call: this._normalizeContract(row.call, 'call'),
-            put: this._normalizeContract(row.put, 'put')
+            call: this._normalizeContract(row.call),
+            put: this._normalizeContract(row.put)
         })).filter(r => r.strike > 0).sort((a, b) => a.strike - b.strike);
 
         const ivList = rows.flatMap(r => [r.call?.iv, r.put?.iv]).filter(Boolean);
         const atmIv = ivList.length ? ivList.reduce((a, b) => a + b, 0) / ivList.length : 0.18;
 
+        const S = underlyingPrice;
+        const T = Math.max((new Date(expiry) - new Date()) / (365 * 24 * 3600 * 1000), 0.003);
+
+        // Back-fill BS values for any real contract missing bid/ask/greeks (e.g. after hours)
+        for (const row of rows) {
+            const K = row.strike;
+            const mono = Math.log(S / K);
+            for (const [side, type] of [[row.call, 'call'], [row.put, 'put']]) {
+                if (!side) continue;
+                const iv = side.iv || atmIv * (1 + 0.15 * Math.abs(mono) - 0.1 * mono);
+                if (side.bid == null || side.ask == null || side.delta == null) {
+                    const bs = blackScholes(S, K, T, 0.053, iv, type);
+                    const spread = Math.max(0.01, bs.price * 0.03 + 0.05);
+                    if (side.bid == null)   side.bid   = parseFloat(Math.max(0.01, bs.price - spread/2).toFixed(2));
+                    if (side.ask == null)   side.ask   = parseFloat((bs.price + spread/2).toFixed(2));
+                    if (side.last == null)  side.last  = parseFloat(bs.price.toFixed(2));
+                    if (side.delta == null) side.delta = bs.delta;
+                    if (side.gamma == null) side.gamma = bs.gamma;
+                    if (side.theta == null) side.theta = bs.theta;
+                    if (side.vega == null)  side.vega  = bs.vega;
+                }
+            }
+        }
+
+        // Fill in $1-increment strikes for ATM ±$10 range using Black-Scholes
+        const existingStrikes = new Set(rows.map(r => r.strike));
+        const atmLo = Math.floor(S) - 10;
+        const atmHi = Math.ceil(S) + 10;
+        for (let K = atmLo; K <= atmHi; K++) {
+            const Kf = parseFloat(K.toFixed(2));
+            if (existingStrikes.has(Kf)) continue;
+            const mono = Math.log(S / Kf);
+            const iv = atmIv * (1 + 0.15 * Math.abs(mono) - 0.1 * mono);
+            const cg = blackScholes(S, Kf, T, 0.053, iv, 'call');
+            const pg = blackScholes(S, Kf, T, 0.053, iv * 1.02, 'put');
+            const cs = Math.max(0.01, cg.price * 0.03 + 0.05);
+            const ps = Math.max(0.01, pg.price * 0.03 + 0.05);
+            rows.push({
+                strike: Kf,
+                call: { bid: parseFloat(Math.max(0.01, cg.price - cs/2).toFixed(2)), ask: parseFloat((cg.price + cs/2).toFixed(2)), last: parseFloat(cg.price.toFixed(2)), iv: parseFloat(iv.toFixed(4)), delta: cg.delta, gamma: cg.gamma, theta: cg.theta, vega: cg.vega, volume: 0, oi: 0 },
+                put:  { bid: parseFloat(Math.max(0.01, pg.price - ps/2).toFixed(2)), ask: parseFloat((pg.price + ps/2).toFixed(2)), last: parseFloat(pg.price.toFixed(2)), iv: parseFloat((iv*1.02).toFixed(4)), delta: pg.delta, gamma: pg.gamma, theta: pg.theta, vega: pg.vega, volume: 0, oi: 0 }
+            });
+            existingStrikes.add(Kf);
+        }
+        rows.sort((a, b) => a.strike - b.strike);
+
         return { symbol, underlyingPrice, expiry, expiryDates, rows, atmIv: parseFloat(atmIv.toFixed(4)), source };
     }
 
-    _normalizeContract(c, type) {
+    _normalizeContract(c) {
         if (!c) return null;
         return {
-            bid: parseFloat(c.bid || 0),
-            ask: parseFloat(c.ask || 0),
-            last: parseFloat(c.close || c.lastPrice || 0),
+            bid: c.bid != null && c.bid !== '' ? parseFloat(c.bid) : null,
+            ask: c.ask != null && c.ask !== '' ? parseFloat(c.ask) : null,
+            last: c.close != null && c.close !== '' ? parseFloat(c.close) : (c.lastPrice != null ? parseFloat(c.lastPrice) : null),
             iv: parseFloat(c.iv || c.impliedVolatility || 0),
-            delta: parseFloat(c.delta || 0),
-            gamma: parseFloat(c.gamma || 0),
-            theta: parseFloat(c.theta || 0),
-            vega: parseFloat(c.vega || 0),
+            delta: c.delta != null && c.delta !== '' ? parseFloat(c.delta) : null,
+            gamma: c.gamma != null && c.gamma !== '' ? parseFloat(c.gamma) : null,
+            theta: c.theta != null && c.theta !== '' ? parseFloat(c.theta) : null,
+            vega: c.vega != null && c.vega !== '' ? parseFloat(c.vega) : null,
             volume: parseInt(c.volume || c.latestPriceVol || 0),
             oi: parseInt(c.openInterest || 0)
         };
     }
 
     _generateMockChain(symbol, S, expiry, expiryDates) {
-        const now = new Date();
-        const exp = new Date(expiry);
-        const T = Math.max((exp - now) / (365 * 24 * 3600 * 1000), 0.003);
-        const r = 0.053;
+        const T = Math.max((new Date(expiry) - new Date()) / (365 * 24 * 3600 * 1000), 0.003);
         const baseIv = { IWM: 0.175, SPY: 0.145, QQQ: 0.195, AAPL: 0.265, TSLA: 0.585, NVDA: 0.485, AMZN: 0.305, MSFT: 0.225 }[symbol] || 0.25;
+        const outerStep = S < 50 ? 1 : S < 150 ? 2.5 : S < 300 ? 5 : 10;
+        const atmLo = Math.floor(S) - 10;
+        const atmHi = Math.ceil(S) + 10;
 
-        const strikeStep = S < 50 ? 1 : S < 150 ? 2.5 : S < 300 ? 5 : 10;
-        const atmStrike = Math.round(S / strikeStep) * strikeStep;
-        const strikes = [];
-        for (let i = -20; i <= 20; i++) {
-            strikes.push(parseFloat((atmStrike + i * strikeStep).toFixed(2)));
+        // Build strike list: $1 increments for ATM±$10, outer step beyond that
+        const strikes = new Set();
+        for (let K = atmLo; K <= atmHi; K++) strikes.add(parseFloat(K.toFixed(2)));
+        const outerAtm = Math.round(S / outerStep) * outerStep;
+        for (let i = -30; i <= 30; i++) {
+            const K = parseFloat((outerAtm + i * outerStep).toFixed(2));
+            if (K > 0) strikes.add(K);
         }
 
-        const rows = strikes.map(K => {
-            const moneyness = Math.log(S / K);
-            const ivSkew = baseIv * (1 + 0.15 * Math.abs(moneyness) - 0.1 * moneyness);
-            const callGs = blackScholes(S, K, T, r, ivSkew, 'call');
-            const putGs = blackScholes(S, K, T, r, ivSkew * 1.02, 'put');
-            const callSpread = Math.max(0.01, callGs.price * 0.03 + 0.05);
-            const putSpread = Math.max(0.01, putGs.price * 0.03 + 0.05);
-
+        const rows = [...strikes].sort((a, b) => a - b).map(K => {
+            const mono = Math.log(S / K);
+            const iv = baseIv * (1 + 0.15 * Math.abs(mono) - 0.1 * mono);
+            const cg = blackScholes(S, K, T, 0.053, iv, 'call');
+            const pg = blackScholes(S, K, T, 0.053, iv * 1.02, 'put');
+            const cs = Math.max(0.01, cg.price * 0.03 + 0.05);
+            const ps = Math.max(0.01, pg.price * 0.03 + 0.05);
             return {
                 strike: K,
-                call: {
-                    bid: parseFloat(Math.max(0.01, callGs.price - callSpread / 2).toFixed(2)),
-                    ask: parseFloat((callGs.price + callSpread / 2).toFixed(2)),
-                    last: parseFloat(callGs.price.toFixed(2)),
-                    iv: parseFloat(ivSkew.toFixed(4)),
-                    delta: callGs.delta,
-                    gamma: callGs.gamma,
-                    theta: callGs.theta,
-                    vega: callGs.vega,
-                    volume: Math.floor(Math.random() * 2000 + 100) * Math.max(1, Math.round(1 / (1 + 2 * Math.abs(moneyness)))),
-                    oi: Math.floor(Math.random() * 8000 + 500)
-                },
-                put: {
-                    bid: parseFloat(Math.max(0.01, putGs.price - putSpread / 2).toFixed(2)),
-                    ask: parseFloat((putGs.price + putSpread / 2).toFixed(2)),
-                    last: parseFloat(putGs.price.toFixed(2)),
-                    iv: parseFloat((ivSkew * 1.02).toFixed(4)),
-                    delta: putGs.delta,
-                    gamma: putGs.gamma,
-                    theta: putGs.theta,
-                    vega: putGs.vega,
-                    volume: Math.floor(Math.random() * 2500 + 150) * Math.max(1, Math.round(1 / (1 + 2 * Math.abs(moneyness)))),
-                    oi: Math.floor(Math.random() * 10000 + 800)
-                }
+                call: { bid: parseFloat(Math.max(0.01, cg.price - cs/2).toFixed(2)), ask: parseFloat((cg.price + cs/2).toFixed(2)), last: parseFloat(cg.price.toFixed(2)), iv: parseFloat(iv.toFixed(4)), delta: cg.delta, gamma: cg.gamma, theta: cg.theta, vega: cg.vega, volume: Math.floor(Math.random() * 2000 + 100), oi: Math.floor(Math.random() * 8000 + 500) },
+                put:  { bid: parseFloat(Math.max(0.01, pg.price - ps/2).toFixed(2)), ask: parseFloat((pg.price + ps/2).toFixed(2)), last: parseFloat(pg.price.toFixed(2)), iv: parseFloat((iv*1.02).toFixed(4)), delta: pg.delta, gamma: pg.gamma, theta: pg.theta, vega: pg.vega, volume: Math.floor(Math.random() * 2500 + 150), oi: Math.floor(Math.random() * 10000 + 800) }
             };
         });
-
-        const atmIv = baseIv;
-        return { symbol, underlyingPrice: S, expiry, expiryDates, rows, atmIv, source: 'mock' };
+        return { symbol, underlyingPrice: S, expiry, expiryDates, rows, atmIv: baseIv, source: 'mock' };
     }
 
-    async getPositions() {
+    // ─── Live account data from Webull OpenAPI ────────────────────────────────
+    async getAccountBalance() {
         try {
-            const posPath = path.join(__dirname, '../data/positions.json');
-            const data = JSON.parse(fs.readFileSync(posPath, 'utf8'));
-            return data;
-        } catch {
-            return { positions: [], history: [] };
+            const data = await this._get('/openapi/assets/balance', { account_id: this.accountId });
+            return { ...data, source: 'webull' };
+        } catch (e) {
+            console.error('[Webull] Balance failed:', e.response?.data || e.message);
+            return null;
         }
     }
 
-    async savePositions(data) {
-        const posPath = path.join(__dirname, '../data/positions.json');
-        fs.writeFileSync(posPath, JSON.stringify(data, null, 2));
+    async getAccountPositions() {
+        try {
+            const data = await this._get('/openapi/assets/positions', { account_id: this.accountId });
+            return { positions: Array.isArray(data) ? data : [], source: 'webull' };
+        } catch (e) {
+            console.error('[Webull] Positions failed:', e.response?.data || e.message);
+            return { positions: [], source: 'error' };
+        }
     }
 
-    // IV Rank mock: compares current IV to 52-week range
+    // ─── Local position file (manual trades) ─────────────────────────────────
+    async getLocalPositions() {
+        try {
+            return JSON.parse(fs.readFileSync(path.join(__dirname, '../data/positions.json'), 'utf8'));
+        } catch { return { positions: [], history: [] }; }
+    }
+
+    async saveLocalPositions(data) {
+        fs.writeFileSync(path.join(__dirname, '../data/positions.json'), JSON.stringify(data, null, 2));
+    }
+
     getIvRank(symbol) {
         const ranks = { IWM: 42, SPY: 38, QQQ: 51, AAPL: 29, TSLA: 72, NVDA: 65, AMZN: 44, MSFT: 35 };
         return ranks[symbol.toUpperCase()] || Math.floor(Math.random() * 60 + 20);

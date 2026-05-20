@@ -1,148 +1,128 @@
 const express = require('express');
 const router = express.Router();
 const webull = require('../services/webullService');
-const { VertexAI } = require('@google-cloud/vertexai');
+const Anthropic = require('@anthropic-ai/sdk');
 
-const projectID = process.env.GCP_PROJECT_ID || 'mock-project';
-let vertex_ai = null;
-let generativeModel = null;
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-function getModel() {
-    if (!generativeModel) {
-        try {
-            vertex_ai = new VertexAI({ project: projectID, location: 'us-central1' });
-            generativeModel = vertex_ai.getGenerativeModel({
-                model: 'gemini-1.5-pro',
-                generationConfig: { responseMimeType: 'application/json', temperature: 0.3, maxOutputTokens: 2048 }
-            });
-        } catch { /* model unavailable */ }
-    }
-    return generativeModel;
-}
+function buildStrikePrompt(ticker, strategyPref, chain, quote, ivRank) {
+    const S = quote.price;
+    const T = chain.expiry;
+    const atmIdx = chain.rows.reduce((bi, r, i) =>
+        Math.abs(r.strike - S) < Math.abs(chain.rows[bi].strike - S) ? i : bi, 0);
 
-function buildPrompt(ticker, strategy, chain, quote) {
-    const atm = chain.rows.find(r => Math.abs(r.strike - quote.price) === Math.min(...chain.rows.map(r => Math.abs(r.strike - quote.price))));
-    const atmIvPct = (chain.atmIv * 100).toFixed(1);
-    const ivRank = webull.getIvRank(ticker);
+    // Send ATM ±15 strikes so Claude has full context
+    const window = chain.rows.slice(Math.max(0, atmIdx - 15), atmIdx + 16);
+    const strikeTable = window.map(r => {
+        const c = r.call, p = r.put;
+        return `${r.strike.toFixed(2).padStart(7)} | CALL bid=${(c?.bid??'--')} ask=${(c?.ask??'--')} iv=${c?.iv?(c.iv*100).toFixed(1)+'%':'--'} delta=${c?.delta??'--'} theta=${c?.theta??'--'} oi=${c?.oi??0} vol=${c?.volume??0} | PUT bid=${(p?.bid??'--')} ask=${(p?.ask??'--')} iv=${p?.iv?(p.iv*100).toFixed(1)+'%':'--'} delta=${p?.delta??'--'} theta=${p?.theta??'--'} oi=${p?.oi??0} vol=${p?.volume??0}`;
+    }).join('\n');
 
-    return `You are a professional options trading analyst. Analyze the following real-time options data and produce a JSON recommendation.
+    return `You are an expert options trader analyzing live market data to select the single best option strike for a trade.
 
-MARKET DATA:
+LIVE MARKET DATA:
 - Ticker: ${ticker}
-- Current Price: $${quote.price}
-- Daily Change: ${quote.change > 0 ? '+' : ''}${quote.change} (${(quote.changeRatio * 100).toFixed(2)}%)
-- ATM Strike: $${atm?.strike || 'N/A'}
-- ATM IV: ${atmIvPct}%
-- IV Rank: ${ivRank}%
-- Expiry analyzed: ${chain.expiry}
-- ATM Call — Bid/Ask: $${atm?.call?.bid || 0}/$${atm?.call?.ask || 0}, Delta: ${atm?.call?.delta || 0}, Theta: ${atm?.call?.theta || 0}
-- ATM Put — Bid/Ask: $${atm?.put?.bid || 0}/$${atm?.put?.ask || 0}, Delta: ${atm?.put?.delta || 0}, Theta: ${atm?.put?.theta || 0}
+- Current Price: $${S}
+- Daily Change: ${quote.change >= 0 ? '+' : ''}${quote.change} (${(quote.changeRatio*100).toFixed(2)}%)
+- Expiry: ${T}
+- ATM IV: ${(chain.atmIv*100).toFixed(1)}%
+- IV Rank: ${ivRank}% (${ivRank > 60 ? 'HIGH — favor selling premium' : ivRank > 35 ? 'MODERATE' : 'LOW — favor buying options'})
+- Strategy Preference: ${strategyPref}
 
-STRATEGY PREFERENCE: ${strategy}
+OPTIONS CHAIN (ATM ±15 strikes):
+ STRIKE  | ──────────────── CALLS ──────────────────────────── | ──────────────── PUTS ──────────────────────────────
+${strikeTable}
 
-NEARBY STRIKES (5 above and below ATM):
-${chain.rows.slice(Math.max(0, chain.rows.findIndex(r => r.strike === atm?.strike) - 5), chain.rows.findIndex(r => r.strike === atm?.strike) + 6).map(r =>
-    `  $${r.strike}: Call IV ${(r.call?.iv * 100 || 0).toFixed(1)}% Δ${r.call?.delta || 0} | Put IV ${(r.put?.iv * 100 || 0).toFixed(1)}% Δ${r.put?.delta || 0}`
-).join('\n')}
+TASK: Select the single BEST strike (or strike pair for spreads) for this trade.
+Consider:
+1. Delta positioning — what delta gives the best risk/reward for this strategy?
+2. Bid/ask spread — avoid illiquid strikes (wide spread or zero OI/volume)
+3. Theta decay — higher theta favors short premium
+4. IV smile — which strikes have inflated IV worth selling or cheap IV worth buying?
+5. Probability of profit — use delta as proxy for ITM probability
 
-Provide a JSON response with these exact fields:
+Respond ONLY with valid JSON, no markdown, no explanation outside JSON:
 {
-  "recommendedStrategy": "strategy name",
-  "strategyType": "CREDIT_SPREAD | DEBIT_SPREAD | IRON_CONDOR | COVERED_CALL | LONG_CALL | LONG_PUT | CASH_SECURED_PUT",
-  "legs": [{"action": "BUY|SELL", "type": "CALL|PUT", "strike": 0, "expiry": "date", "contracts": 1, "price": 0}],
-  "netCredit": 0,
-  "maxProfit": 0,
-  "maxLoss": 0,
-  "breakeven": 0,
+  "recommendedStrategy": "clear strategy name",
+  "strategyType": "CREDIT_SPREAD|DEBIT_SPREAD|IRON_CONDOR|COVERED_CALL|LONG_CALL|LONG_PUT|CASH_SECURED_PUT|STRADDLE|STRANGLE",
+  "legs": [
+    {"action": "BUY|SELL", "type": "CALL|PUT", "strike": 0.00, "expiry": "${T}", "contracts": 1, "bid": 0.00, "ask": 0.00, "delta": 0.00, "iv": 0.00, "whyThisStrike": "specific reason referencing the data"}
+  ],
+  "netCredit": 0.00,
+  "maxProfit": 0.00,
+  "maxLoss": 0.00,
+  "breakeven": 0.00,
   "probabilityOfProfit": "XX%",
   "ivRankAssessment": "LOW|MEDIUM|HIGH|ELEVATED",
   "marketBias": "BULLISH|BEARISH|NEUTRAL",
   "riskRewardRatio": "1:X",
-  "analysisRationale": "2-3 sentence explanation referencing the actual data",
-  "keyRisks": ["risk1", "risk2"],
-  "idealExitPlan": "description of exit strategy",
-  "confidenceScore": 0
+  "strikeSelectionRationale": "2-3 sentences explaining specifically WHY these strikes were chosen over alternatives — reference actual bid/ask, delta, OI, theta from the data",
+  "alternativeStrike": {"strike": 0.00, "type": "CALL|PUT", "reason": "why this is the runner-up"},
+  "keyRisks": ["risk1", "risk2", "risk3"],
+  "idealExitPlan": "specific exit criteria with prices",
+  "confidenceScore": 75
 }`;
 }
 
-function mockAnalysis(ticker, strategy, chain, quote) {
-    const isIncome = strategy.toLowerCase().includes('income') || strategy.toLowerCase().includes('credit');
-    const isNeutral = strategy.toLowerCase().includes('neutral') || strategy.toLowerCase().includes('condor');
-    const atm = chain.rows.find(r => Math.abs(r.strike - quote.price) === Math.min(...chain.rows.map(r => Math.abs(r.strike - quote.price))));
-    const shortPut = chain.rows.find(r => r.strike < quote.price * 0.965);
-    const longPut = chain.rows.find(r => r.strike < quote.price * 0.94);
-    const shortCall = chain.rows.find(r => r.strike > quote.price * 1.03);
-    const ivRank = webull.getIvRank(ticker);
+// POST /api/agent/position-chat
+router.post('/position-chat', async (req, res) => {
+    const { message, positions = [] } = req.body;
+    if (!message) return res.status(400).json({ error: 'Message required.' });
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'ANTHROPIC_API_KEY not set.' });
 
-    if (isIncome && !isNeutral) {
-        const credit = parseFloat(((shortPut?.put?.bid || 1.5) - (longPut?.put?.ask || 0.50)).toFixed(2));
-        const width = shortPut && longPut ? shortPut.strike - longPut.strike : 5;
-        return {
-            recommendedStrategy: `${ticker} Credit Put Spread`,
-            strategyType: 'CREDIT_SPREAD',
-            legs: [
-                { action: 'SELL', type: 'PUT', strike: shortPut?.strike || Math.round(quote.price * 0.965), expiry: chain.expiry, contracts: 1, price: shortPut?.put?.bid || 1.50 },
-                { action: 'BUY', type: 'PUT', strike: longPut?.strike || Math.round(quote.price * 0.94), expiry: chain.expiry, contracts: 1, price: longPut?.put?.ask || 0.50 }
-            ],
-            netCredit: credit,
-            maxProfit: parseFloat((credit * 100).toFixed(2)),
-            maxLoss: parseFloat(((width - credit) * 100).toFixed(2)),
-            breakeven: parseFloat(((shortPut?.strike || quote.price * 0.965) - credit).toFixed(2)),
-            probabilityOfProfit: `${Math.round(68 + (ivRank - 50) * 0.1)}%`,
-            ivRankAssessment: ivRank > 60 ? 'HIGH' : ivRank > 40 ? 'MEDIUM' : 'LOW',
-            marketBias: 'BULLISH',
-            riskRewardRatio: `1:${(width / credit - 1).toFixed(1)}`,
-            analysisRationale: `IV Rank of ${ivRank}% ${ivRank > 50 ? 'is elevated, making premium selling favorable' : 'suggests moderate premium pricing'}. The put spread at $${shortPut?.strike || 'ATM-3%'} / $${longPut?.strike || 'ATM-6%'} collects $${credit} credit with a ${Math.round(65 + (50 - ivRank) * 0.2)}% probability of profit based on current delta positioning. Theta decay of $${Math.abs((atm?.put?.theta || -0.08) * 100).toFixed(0)}/day supports the trade.`,
-            keyRisks: [`Sharp move below $${longPut?.strike || Math.round(quote.price * 0.94)} triggers max loss`, 'IV expansion increases mark-to-market loss', 'Earnings or macro event risk'],
-            idealExitPlan: `Close at 50% of max profit ($${(credit * 50).toFixed(2)}) or at 21 DTE. Stop if debit to close exceeds 2x credit received.`,
-            confidenceScore: Math.min(85, 50 + ivRank * 0.4)
-        };
-    } else if (isNeutral) {
-        const credit = parseFloat(((shortPut?.put?.bid || 1.2) + (shortCall?.call?.bid || 1.1) - 0.80).toFixed(2));
-        return {
-            recommendedStrategy: `${ticker} Iron Condor`,
-            strategyType: 'IRON_CONDOR',
-            legs: [
-                { action: 'SELL', type: 'PUT', strike: shortPut?.strike || Math.round(quote.price * 0.965), expiry: chain.expiry, contracts: 1, price: shortPut?.put?.bid || 1.20 },
-                { action: 'BUY', type: 'PUT', strike: longPut?.strike || Math.round(quote.price * 0.94), expiry: chain.expiry, contracts: 1, price: longPut?.put?.ask || 0.35 },
-                { action: 'SELL', type: 'CALL', strike: shortCall?.strike || Math.round(quote.price * 1.03), expiry: chain.expiry, contracts: 1, price: shortCall?.call?.bid || 1.10 },
-                { action: 'BUY', type: 'CALL', strike: Math.round(quote.price * 1.055), expiry: chain.expiry, contracts: 1, price: 0.30 }
-            ],
-            netCredit: credit,
-            maxProfit: parseFloat((credit * 100).toFixed(2)),
-            maxLoss: parseFloat(((5 - credit) * 100).toFixed(2)),
-            breakeven: parseFloat((quote.price).toFixed(2)),
-            probabilityOfProfit: `${Math.round(52 + ivRank * 0.15)}%`,
-            ivRankAssessment: ivRank > 60 ? 'HIGH' : ivRank > 40 ? 'MEDIUM' : 'LOW',
-            marketBias: 'NEUTRAL',
-            riskRewardRatio: `1:${((5 - credit) / credit).toFixed(1)}`,
-            analysisRationale: `With IV Rank at ${ivRank}%, the iron condor captures the volatility premium from both sides. The range between $${shortPut?.strike || 'ATM-3%'} and $${shortCall?.strike || 'ATM+3%'} captures approximately ${Math.round(68 + ivRank * 0.1)}% of expected outcomes based on current ATM IV of ${(chain.atmIv * 100).toFixed(1)}%.`,
-            keyRisks: ['Directional gap through either short strike', 'IV expansion increases mark-to-market losses', 'Pin risk near expiration'],
-            idealExitPlan: `Close at 25% of max profit or if either short strike is tested. Roll untested side for additional credit if market moves.`,
-            confidenceScore: Math.min(78, 45 + ivRank * 0.4)
-        };
-    } else {
-        return {
-            recommendedStrategy: `${ticker} Long Call`,
-            strategyType: 'LONG_CALL',
-            legs: [
-                { action: 'BUY', type: 'CALL', strike: atm?.strike || Math.round(quote.price), expiry: chain.expiry, contracts: 1, price: atm?.call?.ask || 3.20 }
-            ],
-            netCredit: -(atm?.call?.ask || 3.20),
-            maxProfit: 999,
-            maxLoss: parseFloat(((atm?.call?.ask || 3.20) * 100).toFixed(2)),
-            breakeven: parseFloat(((atm?.strike || quote.price) + (atm?.call?.ask || 3.20)).toFixed(2)),
-            probabilityOfProfit: `${Math.round(Math.abs(atm?.call?.delta || 0.50) * 100)}%`,
-            ivRankAssessment: ivRank > 60 ? 'HIGH' : ivRank > 40 ? 'MEDIUM' : 'LOW',
-            marketBias: 'BULLISH',
-            riskRewardRatio: 'Unlimited upside',
-            analysisRationale: `Directional call at the ATM strike ($${atm?.strike}) with delta of ${atm?.call?.delta || 0.50}. Current IV of ${(chain.atmIv * 100).toFixed(1)}% ${ivRank > 50 ? 'is elevated so theta decay is a headwind — consider a spread to reduce cost' : 'is reasonable for a long position'}. Breakeven at $${((atm?.strike || quote.price) + (atm?.call?.ask || 3.20)).toFixed(2)}.`,
-            keyRisks: ['IV crush reduces value even if stock moves in your favor', `Premium of $${((atm?.call?.ask || 3.20) * 100).toFixed(0)} is the max loss`, 'Time decay accelerates in final 21 DTE'],
-            idealExitPlan: `Take 50% profit target or close at 21 DTE. Cut loss at 50% of premium paid.`,
-            confidenceScore: Math.max(35, 65 - ivRank * 0.3)
-        };
+    // Build rich position context
+    let posContext = 'No open positions.';
+    if (positions.length) {
+        posContext = positions.map(p => {
+            const lines = [
+                `Symbol: ${p.symbol} | Strategy: ${p.type} | Mkt Value: $${p.marketValue} | Unrealized P&L: ${p.unrealizedPnl >= 0 ? '+' : ''}$${p.unrealizedPnl} (${(p.unrealizedPnlRate * 100).toFixed(2)}%)`
+            ];
+            if (Array.isArray(p.legs)) {
+                p.legs.forEach(l => {
+                    if (l.instrumentType === 'EQUITY') {
+                        lines.push(`  STOCK leg: ${p.qty} shares @ cost $${l.costPrice}/sh, last $${l.lastPrice}, unreal P&L $${l.unrealizedPnl}`);
+                    } else if (l.instrumentType === 'OPTION') {
+                        lines.push(`  OPTION leg: ${l.optionType} strike $${l.strike} exp ${l.expiry}, ${p.contracts} contracts @ cost $${l.costPrice}/contract, last $${l.lastPrice}, unreal P&L $${l.unrealizedPnl}`);
+                    }
+                });
+            }
+            return lines.join('\n');
+        }).join('\n\n');
     }
-}
+
+    // Fetch live quotes for position symbols
+    const symbols = [...new Set(positions.map(p => p.symbol).filter(Boolean))];
+    const quoteLines = [];
+    for (const sym of symbols) {
+        try {
+            const q = await webull.getQuote(sym);
+            quoteLines.push(`${sym}: $${q.price} (${q.change >= 0 ? '+' : ''}${q.change}, ${(q.changeRatio * 100).toFixed(2)}%)`);
+        } catch { /* skip */ }
+    }
+
+    const systemPrompt = `You are an expert options trading analyst with deep knowledge of risk management, options Greeks, and position management strategies.
+
+The user has the following LIVE open positions (data from Webull):
+${posContext}
+
+LIVE MARKET QUOTES:
+${quoteLines.join('\n') || 'Unavailable'}
+
+Answer the user's question concisely and specifically using the actual position data above. Be direct — give specific numbers, specific strikes, specific actions. If recommending an adjustment or exit, explain exactly how to execute it. Keep responses under 250 words unless detail is specifically needed.`;
+
+    try {
+        const message_resp = await client.messages.create({
+            model: 'claude-opus-4-7',
+            max_tokens: 1024,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: message }]
+        });
+        res.json({ reply: message_resp.content[0].text });
+    } catch (e) {
+        console.error('[Position Chat]', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
 
 // POST /api/agent/analyze
 router.post('/analyze', async (req, res) => {
@@ -157,25 +137,25 @@ router.post('/analyze', async (req, res) => {
             webull.getQuote(sym),
             webull.getOptionChain(sym)
         ]);
+        const ivRank = webull.getIvRank(sym);
 
-        let analysis;
-        const model = getModel();
-        if (model && projectID !== 'mock-project') {
-            try {
-                const prompt = buildPrompt(sym, strategyPreference, chain, quote);
-                const result = await model.generateContent(prompt);
-                const text = result.response?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-                analysis = JSON.parse(text);
-                analysis._source = 'gemini';
-            } catch (aiErr) {
-                console.warn('[Agent] Gemini call failed, using rule-based analysis:', aiErr.message);
-                analysis = mockAnalysis(sym, strategyPreference, chain, quote);
-                analysis._source = 'rule_based';
-            }
-        } else {
-            analysis = mockAnalysis(sym, strategyPreference, chain, quote);
-            analysis._source = 'rule_based';
+        if (!process.env.ANTHROPIC_API_KEY) {
+            return res.status(503).json({ error: 'ANTHROPIC_API_KEY not set in .env' });
         }
+
+        const prompt = buildStrikePrompt(sym, strategyPreference, chain, quote, ivRank);
+
+        const message = await client.messages.create({
+            model: 'claude-opus-4-7',
+            max_tokens: 2048,
+            messages: [{ role: 'user', content: prompt }]
+        });
+
+        const raw = message.content[0].text.trim();
+        // Strip any accidental markdown fences
+        const jsonStr = raw.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+        const analysis = JSON.parse(jsonStr);
+        analysis._source = 'claude-opus-4-7';
 
         res.json({
             ticker: sym,
@@ -183,7 +163,7 @@ router.post('/analyze', async (req, res) => {
             change: quote.change,
             changeRatio: quote.changeRatio,
             atmIv: chain.atmIv,
-            ivRank: webull.getIvRank(sym),
+            ivRank,
             expiry: chain.expiry,
             dataSource: chain.source,
             ...analysis

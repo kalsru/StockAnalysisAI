@@ -1,4 +1,5 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const app = express();
 
@@ -11,7 +12,7 @@ const screenerRoutes = require('./routes/screener');
 const PORT = process.env.PORT || 8080;
 
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // CORS for dev
 app.use((req, res, next) => {
