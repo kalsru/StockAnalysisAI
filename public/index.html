@@ -103,6 +103,16 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
 .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .card-title { font-size: 0.75rem; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.08em; }
 
+/* ─── Technical Stats ─── */
+.tech-stat { display:flex;flex-direction:column;gap:3px; }
+.tech-stat-label { font-size:0.68rem;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em; }
+.tech-stat-value { font-size:0.95rem;font-weight:700;font-variant-numeric:tabular-nums; }
+.signal-chip { display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:12px;font-size:0.7rem;font-weight:600; }
+.signal-bull { background:rgba(16,185,129,0.15);color:var(--green); }
+.signal-bear { background:rgba(239,68,68,0.15);color:var(--red); }
+.signal-neutral { background:rgba(100,116,139,0.15);color:var(--text2); }
+.grid-3 { display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px; }
+
 /* ─── Position Chat Panel ─── */
 .pos-chat-panel { width: 360px; flex-shrink: 0; background: var(--card); border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; height: calc(100vh - 130px); position: sticky; top: 16px; }
 .pos-chat-header { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.85rem; flex-shrink: 0; }
@@ -582,11 +592,46 @@ tbody td:first-child, tbody td.text-left { text-align: left; }
         </button>
     </div>
 
+    <!-- Technical + Sentiment panels (hidden until analysis runs) -->
+    <div id="ai-tech-sentiment" style="display:none;margin-bottom:20px">
+        <div class="grid-3" style="margin-bottom:16px">
+            <!-- Technical Indicators -->
+            <div class="card" style="grid-column:span 2">
+                <div class="card-header"><div class="card-title"><i data-lucide="bar-chart-2" style="width:13px;height:13px"></i> Technical Indicators</div><span id="tech-trend-badge" class="badge"></span></div>
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:12px 0">
+                    <div class="tech-stat"><div class="tech-stat-label">RSI (14)</div><div class="tech-stat-value" id="t-rsi">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">MACD</div><div class="tech-stat-value" id="t-macd">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">SMA 20</div><div class="tech-stat-value" id="t-sma20">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">SMA 50</div><div class="tech-stat-value" id="t-sma50">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">SMA 200</div><div class="tech-stat-value" id="t-sma200">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">BB Position</div><div class="tech-stat-value" id="t-bb">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">Support</div><div class="tech-stat-value" id="t-support" style="color:var(--green)">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">Resistance</div><div class="tech-stat-value" id="t-resist" style="color:var(--red)">--</div></div>
+                </div>
+                <div style="display:flex;gap:8px;padding-top:8px;border-top:1px solid var(--border);flex-wrap:wrap" id="t-signal-row"></div>
+            </div>
+
+            <!-- Options Sentiment -->
+            <div class="card">
+                <div class="card-header"><div class="card-title"><i data-lucide="activity" style="width:13px;height:13px"></i> Options Sentiment</div><span id="sent-badge" class="badge"></span></div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 0">
+                    <div class="tech-stat"><div class="tech-stat-label">P/C Vol Ratio</div><div class="tech-stat-value" id="s-pcvol">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">P/C OI Ratio</div><div class="tech-stat-value" id="s-pcoi">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">IV Skew</div><div class="tech-stat-value" id="s-skew">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">ATM IV</div><div class="tech-stat-value" id="s-atm-iv">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">Call Vol</div><div class="tech-stat-value" id="s-cvol" style="color:var(--green)">--</div></div>
+                    <div class="tech-stat"><div class="tech-stat-label">Put Vol</div><div class="tech-stat-value" id="s-pvol" style="color:var(--red)">--</div></div>
+                </div>
+                <div style="padding-top:8px;border-top:1px solid var(--border);font-size:0.78rem;color:var(--text2)" id="s-skew-note"></div>
+            </div>
+        </div>
+    </div>
+
     <div id="ai-result">
         <div style="text-align:center;padding:60px;color:var(--text3)">
             <i data-lucide="brain-circuit" style="width:48px;height:48px;margin-bottom:16px;display:block;margin-left:auto;margin-right:auto"></i>
             <div>Enter a ticker and strategy, then click Run Analysis</div>
-            <div style="font-size:0.78rem;margin-top:8px">Powered by Gemini 1.5 Pro + live Webull options data</div>
+            <div style="font-size:0.78rem;margin-top:8px">Powered by Claude Opus 4.7 · Technical Analysis · Options Sentiment</div>
         </div>
     </div>
 </div>
@@ -1237,7 +1282,60 @@ async function runAnalysis() {
     }
 }
 
+function renderTechSentiment(r) {
+    const t = r.technical, s = r.sentiment;
+    if (!t && !s) return;
+    $('ai-tech-sentiment').style.display = 'block';
+
+    if (t) {
+        const ind = t.indicators, sig = t.signals, lev = t.levels;
+        const rsiColor = ind.rsi14 > 70 ? 'var(--red)' : ind.rsi14 < 30 ? 'var(--green)' : 'var(--text)';
+        $('t-rsi').innerHTML = `<span style="color:${rsiColor}">${ind.rsi14}</span>`;
+        $('t-macd').innerHTML = `<span style="color:${ind.macdHistogram > 0 ? 'var(--green)' : 'var(--red)'}">${ind.macd?.toFixed(3)}</span>`;
+        $('t-sma20').innerHTML  = `<span style="color:${sig.aboveSma20?'var(--green)':'var(--red)'}">$${fmt(ind.sma20)}</span>`;
+        $('t-sma50').innerHTML  = `<span style="color:${sig.aboveSma50?'var(--green)':'var(--red)'}">$${fmt(ind.sma50)}</span>`;
+        $('t-sma200').innerHTML = `<span style="color:${sig.aboveSma200?'var(--green)':'var(--red)'}">$${fmt(ind.sma200)}</span>`;
+        $('t-bb').innerHTML = `${ind.bbPosition}%`;
+        $('t-support').textContent = `$${fmt(lev.support)}`;
+        $('t-resist').textContent  = `$${fmt(lev.resistance)}`;
+
+        const trendClass = sig.trendBias === 'BULLISH' ? 'badge-green' : sig.trendBias === 'BEARISH' ? 'badge-red' : 'badge-yellow';
+        $('tech-trend-badge').className = `badge ${trendClass}`;
+        $('tech-trend-badge').textContent = sig.trendBias;
+
+        const chips = [
+            sig.aboveSma20  ? {l:'> SMA20', c:'bull'} : {l:'< SMA20', c:'bear'},
+            sig.aboveSma50  ? {l:'> SMA50', c:'bull'} : {l:'< SMA50', c:'bear'},
+            sig.aboveSma200 ? {l:'> SMA200',c:'bull'} : {l:'< SMA200',c:'bear'},
+            sig.macdBullish ? {l:'MACD ↑',  c:'bull'} : {l:'MACD ↓',  c:'bear'},
+            sig.macdCrossUp ? {l:'MACD Cross ↑', c:'bull'} : sig.macdCrossDown ? {l:'MACD Cross ↓', c:'bear'} : null,
+            ind.rsi14 > 70 ? {l:'RSI Overbought', c:'bear'} : ind.rsi14 < 30 ? {l:'RSI Oversold', c:'bull'} : {l:`RSI ${ind.rsi14}`, c:'neutral'}
+        ].filter(Boolean);
+        $('t-signal-row').innerHTML = chips.map(c => `<span class="signal-chip signal-${c.c}">${c.l}</span>`).join('');
+    }
+
+    if (s) {
+        const pcColor = s.pcRatioVolume > 1.2 ? 'var(--red)' : s.pcRatioVolume < 0.7 ? 'var(--green)' : 'var(--text)';
+        $('s-pcvol').innerHTML = `<span style="color:${pcColor}">${s.pcRatioVolume}</span>`;
+        $('s-pcoi').textContent = s.pcRatioOI;
+        const skewColor = s.ivSkew > 1.15 ? 'var(--red)' : 'var(--text)';
+        $('s-skew').innerHTML = `<span style="color:${skewColor}">${s.ivSkew}</span>`;
+        $('s-atm-iv').textContent = `${s.atmIv}%`;
+        $('s-cvol').textContent = (s.callVolume||0).toLocaleString();
+        $('s-pvol').textContent  = (s.putVolume||0).toLocaleString();
+
+        const sentClass = s.sentiment.includes('BEARISH') ? 'badge-red' : s.sentiment.includes('BULLISH') ? 'badge-green' : 'badge-yellow';
+        $('sent-badge').className = `badge ${sentClass}`;
+        $('sent-badge').textContent = s.sentiment;
+        $('s-skew-note').textContent = s.ivSkew > 1.15
+            ? `Put IV (${s.avgOtmPutIv}%) > Call IV (${s.avgOtmCallIv}%) — elevated hedging demand`
+            : `OTM Put IV: ${s.avgOtmPutIv}%  |  OTM Call IV: ${s.avgOtmCallIv}%`;
+    }
+    lucide.createIcons({nodes:[$('ai-tech-sentiment')]});
+}
+
 function renderAnalysis(r) {
+    renderTechSentiment(r);
     const ivRankColor = r.ivRank > 60 ? 'var(--red)' : r.ivRank > 40 ? 'var(--yellow)' : 'var(--green)';
     const confidence = r.confidenceScore || 0;
 
@@ -1276,7 +1374,7 @@ function renderAnalysis(r) {
                 </div>
                 <div><div style="font-size:0.7rem;color:var(--text2);text-transform:uppercase">Expiry</div><div style="font-weight:600">${r.expiry||'--'}</div></div>
                 <div><div style="font-size:0.7rem;color:var(--text2);text-transform:uppercase">Data</div><span class="badge ${r.dataSource==='live'?'badge-green':'badge-yellow'}">${r.dataSource}</span></div>
-                <div><div style="font-size:0.7rem;color:var(--text2);text-transform:uppercase">Engine</div><span class="badge badge-blue">${r._source==='gemini'?'Gemini 1.5 Pro':'Rule-Based'}</span></div>
+                <div><div style="font-size:0.7rem;color:var(--text2);text-transform:uppercase">Engine</div><span class="badge badge-blue">${r._source==='claude-opus-4-7'?'Claude Opus 4.7':r._source==='gemini'?'Gemini 1.5 Pro':'Rule-Based'}</span></div>
             </div>
 
             <!-- Trade Legs -->

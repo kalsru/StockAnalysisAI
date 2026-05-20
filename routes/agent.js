@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const webull = require('../services/webullService');
+const { getTechnicalData, getOptionsSentiment } = require('../services/technicalService');
 const Anthropic = require('@anthropic-ai/sdk');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-function buildStrikePrompt(ticker, strategyPref, chain, quote, ivRank) {
+function buildStrikePrompt(ticker, strategyPref, chain, quote, ivRank, tech, sentiment) {
     const S = quote.price;
     const T = chain.expiry;
     const atmIdx = chain.rows.reduce((bi, r, i) =>
@@ -18,7 +19,27 @@ function buildStrikePrompt(ticker, strategyPref, chain, quote, ivRank) {
         return `${r.strike.toFixed(2).padStart(7)} | CALL bid=${(c?.bid??'--')} ask=${(c?.ask??'--')} iv=${c?.iv?(c.iv*100).toFixed(1)+'%':'--'} delta=${c?.delta??'--'} theta=${c?.theta??'--'} oi=${c?.oi??0} vol=${c?.volume??0} | PUT bid=${(p?.bid??'--')} ask=${(p?.ask??'--')} iv=${p?.iv?(p.iv*100).toFixed(1)+'%':'--'} delta=${p?.delta??'--'} theta=${p?.theta??'--'} oi=${p?.oi??0} vol=${p?.volume??0}`;
     }).join('\n');
 
-    return `You are an expert options trader analyzing live market data to select the single best option strike for a trade.
+    const techSection = tech ? `
+TECHNICAL ANALYSIS (1-year daily):
+- RSI(14): ${tech.indicators.rsi14} ${tech.indicators.rsi14 > 70 ? '⚠ OVERBOUGHT' : tech.indicators.rsi14 < 30 ? '⚠ OVERSOLD' : ''}
+- SMA20: $${tech.indicators.sma20} | SMA50: $${tech.indicators.sma50} | SMA200: $${tech.indicators.sma200}
+- Price vs MAs: ${tech.signals.aboveSma20?'ABOVE':'BELOW'} SMA20, ${tech.signals.aboveSma50?'ABOVE':'BELOW'} SMA50, ${tech.signals.aboveSma200?'ABOVE':'BELOW'} SMA200
+- MACD: ${tech.indicators.macd?.toFixed(3)} | Signal: ${tech.indicators.macdSignal?.toFixed(3)} | Histogram: ${tech.indicators.macdHistogram?.toFixed(3)} ${tech.signals.macdCrossUp?'🔼 BULLISH CROSS':tech.signals.macdCrossDown?'🔽 BEARISH CROSS':''}
+- Bollinger Bands: Upper $${tech.indicators.bbUpper} | Mid $${tech.indicators.bbMid} | Lower $${tech.indicators.bbLower} | Price at ${tech.indicators.bbPosition}% of band
+- Support: $${tech.levels.support} | Resistance: $${tech.levels.resistance}
+- 52-week High: $${tech.levels.wk52High} | 52-week Low: $${tech.levels.wk52Low}
+- Trend Bias: ${tech.signals.trendBias} (${tech.bullishSignals}/5 bullish signals)` : '';
+
+    const sentSection = sentiment ? `
+OPTIONS SENTIMENT:
+- Put/Call Volume Ratio: ${sentiment.pcRatioVolume} ${sentiment.pcRatioVolume > 1.2 ? '(BEARISH flow)' : sentiment.pcRatioVolume < 0.7 ? '(BULLISH flow)' : '(NEUTRAL)'}
+- Put/Call OI Ratio: ${sentiment.pcRatioOI}
+- Call Volume: ${sentiment.callVolume?.toLocaleString()} | Put Volume: ${sentiment.putVolume?.toLocaleString()}
+- OTM Call IV: ${sentiment.avgOtmCallIv}% | OTM Put IV: ${sentiment.avgOtmPutIv}%
+- IV Skew (Put/Call): ${sentiment.ivSkew} ${sentiment.ivSkew > 1.15 ? '(elevated put skew — hedging demand)' : '(normal)'}
+- Options Sentiment Signal: ${sentiment.sentiment}` : '';
+
+    return `You are an expert options trader. Analyze the full dataset below — technical indicators, options sentiment, and live chain data — to select the BEST strike for this trade.
 
 LIVE MARKET DATA:
 - Ticker: ${ticker}
@@ -28,25 +49,25 @@ LIVE MARKET DATA:
 - ATM IV: ${(chain.atmIv*100).toFixed(1)}%
 - IV Rank: ${ivRank}% (${ivRank > 60 ? 'HIGH — favor selling premium' : ivRank > 35 ? 'MODERATE' : 'LOW — favor buying options'})
 - Strategy Preference: ${strategyPref}
+${techSection}
+${sentSection}
 
 OPTIONS CHAIN (ATM ±15 strikes):
- STRIKE  | ──────────────── CALLS ──────────────────────────── | ──────────────── PUTS ──────────────────────────────
+ STRIKE  | ────────────────── CALLS ──────────────────────── | ────────────────── PUTS ──────────────────────────
 ${strikeTable}
 
-TASK: Select the single BEST strike (or strike pair for spreads) for this trade.
-Consider:
-1. Delta positioning — what delta gives the best risk/reward for this strategy?
-2. Bid/ask spread — avoid illiquid strikes (wide spread or zero OI/volume)
-3. Theta decay — higher theta favors short premium
-4. IV smile — which strikes have inflated IV worth selling or cheap IV worth buying?
-5. Probability of profit — use delta as proxy for ITM probability
+TASK: Using ALL data above (technical trend, sentiment, AND chain data), select the BEST strike(s).
+- Align with the technical trend — don't fight the tape
+- Incorporate sentiment signal into your bias
+- Choose strikes with good liquidity (OI > 500, tight bid/ask)
+- Explain how technicals and sentiment informed the strike choice
 
-Respond ONLY with valid JSON, no markdown, no explanation outside JSON:
+Respond ONLY with valid JSON, no markdown:
 {
   "recommendedStrategy": "clear strategy name",
   "strategyType": "CREDIT_SPREAD|DEBIT_SPREAD|IRON_CONDOR|COVERED_CALL|LONG_CALL|LONG_PUT|CASH_SECURED_PUT|STRADDLE|STRANGLE",
   "legs": [
-    {"action": "BUY|SELL", "type": "CALL|PUT", "strike": 0.00, "expiry": "${T}", "contracts": 1, "bid": 0.00, "ask": 0.00, "delta": 0.00, "iv": 0.00, "whyThisStrike": "specific reason referencing the data"}
+    {"action": "BUY|SELL", "type": "CALL|PUT", "strike": 0.00, "expiry": "${T}", "contracts": 1, "bid": 0.00, "ask": 0.00, "delta": 0.00, "iv": 0.00, "whyThisStrike": "specific reason referencing bid/ask, delta, OI, technical levels"}
   ],
   "netCredit": 0.00,
   "maxProfit": 0.00,
@@ -56,13 +77,25 @@ Respond ONLY with valid JSON, no markdown, no explanation outside JSON:
   "ivRankAssessment": "LOW|MEDIUM|HIGH|ELEVATED",
   "marketBias": "BULLISH|BEARISH|NEUTRAL",
   "riskRewardRatio": "1:X",
-  "strikeSelectionRationale": "2-3 sentences explaining specifically WHY these strikes were chosen over alternatives — reference actual bid/ask, delta, OI, theta from the data",
-  "alternativeStrike": {"strike": 0.00, "type": "CALL|PUT", "reason": "why this is the runner-up"},
+  "technicalSummary": "2 sentences on what RSI, MACD, MAs and price action say",
+  "sentimentSummary": "1-2 sentences on what put/call ratio and IV skew indicate",
+  "strikeSelectionRationale": "2-3 sentences explaining how technicals + sentiment + chain data led to these specific strikes",
+  "alternativeStrike": {"strike": 0.00, "type": "CALL|PUT", "reason": "runner-up and why"},
   "keyRisks": ["risk1", "risk2", "risk3"],
   "idealExitPlan": "specific exit criteria with prices",
   "confidenceScore": 75
 }`;
 }
+
+// GET /api/agent/technical/:symbol
+router.get('/technical/:symbol', async (req, res) => {
+    try {
+        const tech = await getTechnicalData(req.params.symbol.toUpperCase());
+        res.json({ ok: true, data: tech });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
 
 // POST /api/agent/position-chat
 router.post('/position-chat', async (req, res) => {
@@ -139,11 +172,17 @@ router.post('/analyze', async (req, res) => {
         ]);
         const ivRank = webull.getIvRank(sym);
 
+        // Fetch technical + sentiment in parallel (non-blocking on failure)
+        const [tech, sentiment] = await Promise.all([
+            getTechnicalData(sym).catch(e => { console.warn('[Tech]', e.message); return null; }),
+            Promise.resolve(getOptionsSentiment(chain))
+        ]);
+
         if (!process.env.ANTHROPIC_API_KEY) {
             return res.status(503).json({ error: 'ANTHROPIC_API_KEY not set in .env' });
         }
 
-        const prompt = buildStrikePrompt(sym, strategyPreference, chain, quote, ivRank);
+        const prompt = buildStrikePrompt(sym, strategyPreference, chain, quote, ivRank, tech, sentiment);
 
         const message = await client.messages.create({
             model: 'claude-opus-4-7',
@@ -166,6 +205,8 @@ router.post('/analyze', async (req, res) => {
             ivRank,
             expiry: chain.expiry,
             dataSource: chain.source,
+            technical: tech,
+            sentiment,
             ...analysis
         });
     } catch (error) {
