@@ -99,7 +99,7 @@ router.get('/technical/:symbol', async (req, res) => {
 
 // POST /api/agent/position-chat
 router.post('/position-chat', async (req, res) => {
-    const { message, positions = [], image } = req.body;
+    const { message, positions = [], image, chain } = req.body;
     if (!message && !image) return res.status(400).json({ error: 'Message or image required.' });
     if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'ANTHROPIC_API_KEY not set.' });
 
@@ -133,15 +133,32 @@ router.post('/position-chat', async (req, res) => {
         } catch { /* skip */ }
     }
 
+    // Build options chain section if provided
+    let chainSection = '';
+    if (chain && Array.isArray(chain.rows) && chain.rows.length) {
+        const S = chain.underlyingPrice;
+        const strikeTable = chain.rows.map(r => {
+            const c = r.call, p = r.put;
+            const atm = Math.abs(r.strike - S) < 0.51 ? ' ← ATM' : '';
+            return `$${r.strike.toFixed(2).padStart(7)} | CALL bid=${c?.bid??'--'} ask=${c?.ask??'--'} iv=${c?.iv?(c.iv*100).toFixed(1)+'%':'--'} delta=${c?.delta??'--'} oi=${c?.oi??0} vol=${c?.volume??0} | PUT bid=${p?.bid??'--'} ask=${p?.ask??'--'} iv=${p?.iv?(p.iv*100).toFixed(1)+'%':'--'} delta=${p?.delta??'--'} oi=${p?.oi??0} vol=${p?.volume??0}${atm}`;
+        }).join('\n');
+
+        chainSection = `
+
+LIVE OPTIONS CHAIN — ${chain.symbol} (expiry: ${chain.expiry}, price: $${S}, ATM IV: ${chain.atmIv?(chain.atmIv*100).toFixed(1)+'%':'--'}, source: ${chain.source}):
+ STRIKE  | ── CALLS ──────────────────────────────── | ── PUTS ──────────────────────────────────
+${strikeTable}`;
+    }
+
     const systemPrompt = `You are an expert options trading analyst with deep knowledge of risk management, options Greeks, and position management strategies.
 
 The user has the following LIVE open positions (data from Webull):
 ${posContext}
 
 LIVE MARKET QUOTES:
-${quoteLines.join('\n') || 'Unavailable'}
+${quoteLines.join('\n') || 'Unavailable'}${chainSection}
 
-Answer the user's question concisely and specifically using the actual position data above. Be direct — give specific numbers, specific strikes, specific actions. If recommending an adjustment or exit, explain exactly how to execute it. Keep responses under 250 words unless detail is specifically needed.`;
+Answer the user's question concisely and specifically using the actual position and chain data above. Be direct — give specific numbers, specific strikes, specific actions. Reference actual bid/ask, delta, and OI from the chain when relevant. If recommending an adjustment or exit, explain exactly how to execute it. Keep responses under 300 words unless detail is specifically needed.`;
 
     // Build user message content — support text + optional image
     let userContent;

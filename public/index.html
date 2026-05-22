@@ -598,6 +598,7 @@ tbody td:first-child, tbody td.text-left { text-align: left; }
             <div class="pos-chat-header">
                 <i data-lucide="bot" style="width:15px;height:15px;color:var(--accent)"></i>
                 <span>AI Position Analyst</span>
+                <span id="chat-chain-badge" style="margin-left:8px;font-size:0.68rem;color:var(--text3);font-weight:500"></span>
                 <span class="badge" style="margin-left:auto;background:rgba(99,102,241,0.2);color:var(--accent);font-size:0.65rem">Opus 4.7</span>
             </div>
 
@@ -1028,6 +1029,12 @@ async function loadChain(ticker) {
         $('chain-price-display').textContent = `$${fmt(currentChain.underlyingPrice)}`;
         $('chain-iv-display').textContent = `ATM IV: ${(currentChain.atmIv * 100).toFixed(1)}%`;
         $('chain-source-badge').innerHTML = `<span class="badge ${currentChain.source==='live'?'badge-green':'badge-yellow'}">${currentChain.source}</span>`;
+        // Update chat panel to show which chain is in context
+        const chainBadge = document.getElementById('chat-chain-badge');
+        const displayExpiry = (currentChain.expiry && currentChain.expiry !== 'Loading...')
+            ? currentChain.expiry
+            : (currentChain.expiryDates?.[0] || '');
+        if (chainBadge) chainBadge.textContent = `+ ${sym} chain (${displayExpiry})`;
 
         renderChainTable(currentChain);
     } catch (e) {
@@ -1330,10 +1337,31 @@ async function sendPositionChat() {
     msgs.scrollTop = msgs.scrollHeight;
 
     try {
+        // Build compact chain context from currently-loaded chain (ATM ±10)
+        let chainContext = null;
+        if (currentChain && currentChain.rows && currentChain.rows.length) {
+            const S = currentChain.underlyingPrice;
+            const atmIdx = currentChain.rows.reduce((bi, r, i) =>
+                Math.abs(r.strike - S) < Math.abs(currentChain.rows[bi].strike - S) ? i : bi, 0);
+            const window = currentChain.rows.slice(Math.max(0, atmIdx - 10), atmIdx + 11);
+            chainContext = {
+                symbol: currentChain.symbol || $('chain-ticker').value,
+                underlyingPrice: S,
+                expiry: currentChain.expiry,
+                atmIv: currentChain.atmIv,
+                source: currentChain.source,
+                rows: window.map(r => ({
+                    strike: r.strike,
+                    call: r.call ? { bid: r.call.bid, ask: r.call.ask, iv: r.call.iv, delta: r.call.delta, theta: r.call.theta, oi: r.call.oi, volume: r.call.volume } : null,
+                    put:  r.put  ? { bid: r.put.bid,  ask: r.put.ask,  iv: r.put.iv,  delta: r.put.delta,  theta: r.put.theta,  oi: r.put.oi,  volume: r.put.volume  } : null
+                }))
+            };
+        }
+
         const r = await fetch('/api/agent/position-chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: msg || 'Please analyze this image in the context of my positions.', positions: _chatPositions, image: imageDataUrl })
+            body: JSON.stringify({ message: msg || 'Please analyze this image in the context of my positions.', positions: _chatPositions, image: imageDataUrl, chain: chainContext })
         });
         const d = await r.json();
         document.getElementById(typingId)?.remove();
