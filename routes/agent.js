@@ -99,8 +99,8 @@ router.get('/technical/:symbol', async (req, res) => {
 
 // POST /api/agent/position-chat
 router.post('/position-chat', async (req, res) => {
-    const { message, positions = [] } = req.body;
-    if (!message) return res.status(400).json({ error: 'Message required.' });
+    const { message, positions = [], image } = req.body;
+    if (!message && !image) return res.status(400).json({ error: 'Message or image required.' });
     if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'ANTHROPIC_API_KEY not set.' });
 
     // Build rich position context
@@ -143,12 +143,30 @@ ${quoteLines.join('\n') || 'Unavailable'}
 
 Answer the user's question concisely and specifically using the actual position data above. Be direct — give specific numbers, specific strikes, specific actions. If recommending an adjustment or exit, explain exactly how to execute it. Keep responses under 250 words unless detail is specifically needed.`;
 
+    // Build user message content — support text + optional image
+    let userContent;
+    if (image && image.startsWith('data:image/')) {
+        const matches = image.match(/^data:(image\/\w+);base64,(.+)$/);
+        if (matches) {
+            const mediaType = matches[1]; // e.g. image/png
+            const base64Data = matches[2];
+            userContent = [
+                { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } },
+                { type: 'text', text: message || 'Please analyze this image in the context of my positions.' }
+            ];
+        } else {
+            userContent = message;
+        }
+    } else {
+        userContent = message;
+    }
+
     try {
         const message_resp = await client.messages.create({
             model: 'claude-opus-4-7',
             max_tokens: 1024,
             system: systemPrompt,
-            messages: [{ role: 'user', content: message }]
+            messages: [{ role: 'user', content: userContent }]
         });
         res.json({ reply: message_resp.content[0].text });
     } catch (e) {

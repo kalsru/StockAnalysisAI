@@ -616,8 +616,20 @@ tbody td:first-child, tbody td.text-left { text-align: left; }
                 </div>
             </div>
 
+            <!-- Image preview (shown when image is attached) -->
+            <div id="chat-img-preview" style="display:none;padding:8px 12px 0;flex-shrink:0">
+                <div style="position:relative;display:inline-block">
+                    <img id="chat-img-thumb" style="max-height:80px;max-width:100%;border-radius:8px;border:1px solid var(--border)" />
+                    <button onclick="clearChatImage()" style="position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;background:var(--red);border:none;color:#fff;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1">✕</button>
+                </div>
+            </div>
             <div class="pos-chat-input-row">
-                <input type="text" id="pos-chat-input" class="pos-chat-input" placeholder="Ask about your positions..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendPositionChat();}">
+                <!-- Hidden file input -->
+                <input type="file" id="chat-img-file" accept="image/*" style="display:none" onchange="handleChatImageFile(this)">
+                <button class="btn btn-ghost" onclick="document.getElementById('chat-img-file').click()" title="Attach image" style="padding:8px 10px;flex-shrink:0">
+                    <i data-lucide="image" style="width:15px;height:15px"></i>
+                </button>
+                <input type="text" id="pos-chat-input" class="pos-chat-input" placeholder="Ask about your positions… or paste a screenshot" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendPositionChat();}">
                 <button class="btn btn-primary" onclick="sendPositionChat()" id="pos-chat-send" style="padding:8px 14px;flex-shrink:0">
                     <i data-lucide="send" style="width:14px;height:14px"></i>
                 </button>
@@ -1244,6 +1256,48 @@ function renderOpenPositions(positions) {
 
 // ── Position Chat ──────────────────────────────────────────────────
 let _chatPositions = [];
+let _pendingImage = null; // base64 data URL
+
+// ── Image helpers ──────────────────────────────────────────────────────────
+function loadImageAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+function setChatImage(dataUrl) {
+    _pendingImage = dataUrl;
+    $('chat-img-thumb').src = dataUrl;
+    $('chat-img-preview').style.display = 'block';
+}
+
+function clearChatImage() {
+    _pendingImage = null;
+    $('chat-img-preview').style.display = 'none';
+    $('chat-img-file').value = '';
+}
+
+async function handleChatImageFile(input) {
+    if (!input.files[0]) return;
+    const dataUrl = await loadImageAsDataUrl(input.files[0]);
+    setChatImage(dataUrl);
+}
+
+// Paste image from clipboard into chat
+document.addEventListener('paste', async (e) => {
+    if (!document.getElementById('pos-chat-input')?.matches(':focus, *')) return;
+    const items = [...(e.clipboardData?.items || [])];
+    const imgItem = items.find(it => it.type.startsWith('image/'));
+    if (!imgItem) return;
+    e.preventDefault();
+    const file = imgItem.getAsFile();
+    if (!file) return;
+    const dataUrl = await loadImageAsDataUrl(file);
+    setChatImage(dataUrl);
+});
 
 function sendSuggestion(btn) {
     $('pos-chat-input').value = btn.textContent;
@@ -1253,30 +1307,43 @@ function sendSuggestion(btn) {
 async function sendPositionChat() {
     const input = $('pos-chat-input');
     const msg = input.value.trim();
-    if (!msg) return;
+    const imageDataUrl = _pendingImage;
+    if (!msg && !imageDataUrl) return;
 
     const msgs = $('pos-chat-messages');
     input.value = '';
     $('pos-chat-send').disabled = true;
 
-    // User bubble
-    msgs.innerHTML += `<div class="chat-msg chat-msg-user"><div class="chat-msg-content">${msg.replace(/</g,'&lt;')}</div></div>`;
+    // User bubble — show image thumbnail + text
+    let userBubbleContent = '';
+    if (imageDataUrl) {
+        userBubbleContent += `<img src="${imageDataUrl}" style="max-width:200px;max-height:120px;border-radius:8px;display:block;margin-bottom:${msg?'6px':'0'}">`;
+    }
+    if (msg) userBubbleContent += `<span>${msg.replace(/</g,'&lt;')}</span>`;
+    msgs.innerHTML += `<div class="chat-msg chat-msg-user"><div class="chat-msg-content" style="padding:8px">${userBubbleContent}</div></div>`;
+
+    clearChatImage();
 
     // Typing indicator
     const typingId = 'typing-' + Date.now();
-    msgs.innerHTML += `<div class="chat-msg chat-msg-ai chat-msg-typing" id="${typingId}"><div class="chat-msg-content">Analyzing your positions…</div></div>`;
+    msgs.innerHTML += `<div class="chat-msg chat-msg-ai chat-msg-typing" id="${typingId}"><div class="chat-msg-content">Analyzing…</div></div>`;
     msgs.scrollTop = msgs.scrollHeight;
 
     try {
         const r = await fetch('/api/agent/position-chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: msg, positions: _chatPositions })
+            body: JSON.stringify({ message: msg || 'Please analyze this image in the context of my positions.', positions: _chatPositions, image: imageDataUrl })
         });
         const d = await r.json();
         document.getElementById(typingId)?.remove();
         if (d.error) throw new Error(d.error);
-        msgs.innerHTML += `<div class="chat-msg chat-msg-ai"><div class="chat-msg-content">${d.reply.replace(/</g,'&lt;')}</div></div>`;
+        // Render markdown-lite (bold, newlines)
+        const html = d.reply
+            .replace(/</g,'&lt;')
+            .replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')
+            .replace(/\n/g,'<br>');
+        msgs.innerHTML += `<div class="chat-msg chat-msg-ai"><div class="chat-msg-content">${html}</div></div>`;
     } catch (e) {
         document.getElementById(typingId)?.remove();
         msgs.innerHTML += `<div class="chat-msg chat-msg-ai"><div class="chat-msg-content" style="color:var(--red)">Error: ${e.message}</div></div>`;
