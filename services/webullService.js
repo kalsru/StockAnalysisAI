@@ -346,39 +346,17 @@ class WebullService {
         }
     }
 
-    // Probe /openapi/trade/order/history with different param combos (returned 417 = route exists)
+    // Return the full raw trade history data — for inspection
     async probeTradeEndpoints() {
-        const path = '/openapi/trade/order/history';
-        const paramSets = [
-            { account_id: this.accountId, page_size: 20 },
-            { account_id: this.accountId, pageSize: 20 },
-            { account_id: this.accountId, count: 20 },
-            { account_id: this.accountId, page_size: 20, status: 'Filled' },
-            { account_id: this.accountId, page_size: 20, order_status: 'Filled' },
-            { account_id: this.accountId, page_size: 20, filled: true },
-            { accountId: this.accountId, page_size: 20 },
-            { account_id: this.accountId, page_size: 20, create_time_start: '2024-01-01' },
-        ];
-        const results = {};
-        for (const params of paramSets) {
-            const key = JSON.stringify(params);
-            try {
-                const data = await this._get(path, params);
-                results[key] = { ok: true, sample: JSON.stringify(data).slice(0, 300) };
-            } catch (e) {
-                const status = e.response?.status;
-                const msg = e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message;
-                results[key] = { ok: false, status, error: msg };
-            }
-        }
-        // Also try POST
         try {
-            const data = await this._post(path, { account_id: this.accountId, page_size: 20 });
-            results['POST'] = { ok: true, sample: JSON.stringify(data).slice(0, 300) };
+            const data = await this._get('/openapi/trade/order/history', {
+                account_id: this.accountId,
+                page_size: 50
+            });
+            return { ok: true, raw: data };
         } catch (e) {
-            results['POST'] = { ok: false, status: e.response?.status, error: (e.response?.data ? JSON.stringify(e.response.data) : e.message).slice(0, 200) };
+            return { ok: false, error: e.response?.data || e.message };
         }
-        return results;
     }
 
     // ─── Local position file (manual trades) ─────────────────────────────────
