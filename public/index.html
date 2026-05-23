@@ -1427,21 +1427,20 @@ function renderHistoryPositions(history) {
     }
 
     // Categorize each trade
-    // price > $30 in an optionType record = stock ASSIGNMENT at strike price (not premium)
+    // multiplier=100 + optionType + price > $30 = stock rolled (sold/bought at stock price, not option premium)
     const STOCK_PRICE_THRESHOLD = 30;
     const categorized = history.map(h => {
         let tradeType, shares;
         if (!h.optionType) {
             tradeType = 'STOCK';
-            shares = h.qty;
+            shares = h.qty;                     // qty already in shares
         } else if (h.price > STOCK_PRICE_THRESHOLD) {
-            tradeType = 'ASSIGNMENT';    // stock called away / exercised at strike
-            shares = h.qty * 100;        // contracts → shares
+            tradeType = 'STOCK_ROLL';           // stock sold/bought as part of a covered stock roll
+            shares = h.qty * 100;               // contracts → shares (multiplier=100 in backend)
         } else {
-            tradeType = 'OPTION';        // regular covered call premium
-            shares = h.qty;              // contracts
+            tradeType = 'OPTION';               // covered call premium income/cost
+            shares = h.qty;
         }
-        // Total is pre-computed correctly in backend (qty × price × multiplier)
         return { ...h, tradeType, shares };
     });
 
@@ -1459,30 +1458,30 @@ function renderHistoryPositions(history) {
         const sym = h.symbol;
         let tradePnl = null, openDate = null;
 
-        if (h.tradeType === 'STOCK') {
-            if (h.action === 'BUY') {
-                if (!stockLots[sym]) stockLots[sym] = [];
-                stockLots[sym].push({ price: h.price, shares: h.shares, date: h.date });
-            }
-            // Stock BUY = capital deployment, P&L tracked when sold via ASSIGNMENT
-        } else if (h.tradeType === 'ASSIGNMENT') {
-            // Stock sold at strike — match against stock lots
+        if (h.tradeType === 'STOCK' || h.tradeType === 'STOCK_ROLL') {
             if (!stockLots[sym]) stockLots[sym] = [];
-            let remaining = h.shares;
-            let costBasis = 0, costShares = 0;
-            while (remaining > 0 && stockLots[sym].length) {
-                const lot = stockLots[sym][0];
-                const take = Math.min(remaining, lot.shares);
-                costBasis += take * lot.price;
-                costShares += take;
-                remaining -= take;
-                lot.shares -= take;
-                if (!openDate) openDate = lot.date;
-                if (lot.shares <= 0) stockLots[sym].shift();
-            }
-            if (costShares > 0) {
-                tradePnl = parseFloat(((h.price - (costBasis / costShares)) * costShares).toFixed(2));
-                runningPnl += tradePnl;
+            if (h.action === 'BUY') {
+                // Add shares to lot inventory
+                stockLots[sym].push({ price: h.price, shares: h.shares, date: h.date });
+            } else if (h.action === 'SELL') {
+                // SELL (roll-out or close) — match FIFO against existing lots
+                let remaining = h.shares;
+                let costBasis = 0, costShares = 0;
+                while (remaining > 0 && stockLots[sym].length) {
+                    const lot = stockLots[sym][0];
+                    const take = Math.min(remaining, lot.shares);
+                    costBasis += take * lot.price;
+                    costShares += take;
+                    remaining -= take;
+                    lot.shares -= take;
+                    if (!openDate) openDate = lot.date;
+                    if (lot.shares <= 0) stockLots[sym].shift();
+                }
+                if (costShares > 0) {
+                    tradePnl = parseFloat(((h.price - (costBasis / costShares)) * costShares).toFixed(2));
+                    runningPnl += tradePnl;
+                }
+                // If no lots found (stock held before history window), P&L stays null
             }
         } else if (h.tradeType === 'OPTION') {
             const key = `${sym}|${h.expiry||''}`;
@@ -1519,24 +1518,24 @@ function renderHistoryPositions(history) {
         .reduce((s, h) => s + h.total, 0);
     const totalOptCost    = categorized.filter(h => h.tradeType === 'OPTION' && h.action === 'BUY')
         .reduce((s, h) => s + h.total, 0);
-    const totalStockIn    = categorized.filter(h => h.tradeType === 'STOCK' && h.action === 'BUY')
+    const totalStockIn    = categorized.filter(h => (h.tradeType === 'STOCK' || h.tradeType === 'STOCK_ROLL') && h.action === 'BUY')
         .reduce((s, h) => s + h.total, 0);
-    const totalAssigned   = categorized.filter(h => h.tradeType === 'ASSIGNMENT')
+    const totalStockOut   = categorized.filter(h => (h.tradeType === 'STOCK' || h.tradeType === 'STOCK_ROLL') && h.action === 'SELL')
         .reduce((s, h) => s + h.total, 0);
-    const netCapital      = totalStockIn - totalAssigned; // still-deployed capital
+    const netCapital      = totalStockIn - totalStockOut; // net capital still deployed
     const netPremium      = totalOptPremium - totalOptCost;
 
     // Build rows (newest first)
     const rows = [...withPnl].reverse().map(h => {
-        const typeLabel = h.tradeType === 'ASSIGNMENT' ? 'ASSIGNMENT'
+        const typeLabel = h.tradeType === 'STOCK_ROLL' ? 'STOCK ROLL'
             : h.tradeType === 'OPTION' ? `${h.optionType||'OPTION'}${h.expiry?' '+h.expiry:''}` : 'STOCK';
-        const typeBg = h.tradeType === 'ASSIGNMENT' ? 'rgba(139,92,246,0.15)'
+        const typeBg = h.tradeType === 'STOCK_ROLL' ? 'rgba(251,191,36,0.15)'
             : h.tradeType === 'OPTION' ? 'rgba(59,130,246,0.15)' : 'rgba(16,185,129,0.15)';
-        const typeClr = h.tradeType === 'ASSIGNMENT' ? '#a78bfa'
+        const typeClr = h.tradeType === 'STOCK_ROLL' ? '#fbbf24'
             : h.tradeType === 'OPTION' ? '#60a5fa' : 'var(--green)';
         const aBg  = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
         const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
-        const sharesDisplay = h.tradeType === 'ASSIGNMENT' ? `${h.shares} sh` : h.qty;
+        const sharesDisplay = h.tradeType === 'STOCK_ROLL' ? `${h.shares} sh` : h.tradeType === 'STOCK' ? `${h.shares} sh` : `${h.qty}c`;
         const pnlCell = h.tradePnl !== null
             ? `<span style="color:${h.tradePnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.tradePnl>=0?'+':''}$${fmt(Math.abs(h.tradePnl))}</span>`
             : '<span style="color:var(--text3)">—</span>';
