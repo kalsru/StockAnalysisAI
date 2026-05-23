@@ -358,27 +358,37 @@ class WebullService {
         return { orders: [], source: 'not_found', error: 'No working trade history endpoint found' };
     }
 
-    // Probe all candidate endpoints and return results — for debugging
+    // Probe /openapi/trade/order/history with different param combos (returned 417 = route exists)
     async probeTradeEndpoints() {
-        const candidates = [
-            '/openapi/trade/order',
-            '/openapi/trade/order/filled',
-            '/openapi/order/list',
-            '/openapi/trade/activity',
-            '/openapi/account/order/list',
-            '/openapi/v1/trade/order/list',
-            '/openapi/assets/order/list',
-            '/openapi/trade/history',
-            '/openapi/trade/order/history',
+        const path = '/openapi/trade/order/history';
+        const paramSets = [
+            { account_id: this.accountId, page_size: 20 },
+            { account_id: this.accountId, pageSize: 20 },
+            { account_id: this.accountId, count: 20 },
+            { account_id: this.accountId, page_size: 20, status: 'Filled' },
+            { account_id: this.accountId, page_size: 20, order_status: 'Filled' },
+            { account_id: this.accountId, page_size: 20, filled: true },
+            { accountId: this.accountId, page_size: 20 },
+            { account_id: this.accountId, page_size: 20, create_time_start: '2024-01-01' },
         ];
         const results = {};
-        for (const path of candidates) {
+        for (const params of paramSets) {
+            const key = JSON.stringify(params);
             try {
-                const data = await this._get(path, { account_id: this.accountId, page_size: 5 });
-                results[path] = { ok: true, sample: JSON.stringify(data).slice(0, 200) };
+                const data = await this._get(path, params);
+                results[key] = { ok: true, sample: JSON.stringify(data).slice(0, 300) };
             } catch (e) {
-                results[path] = { ok: false, error: e.response?.data?.error_msg || e.message };
+                const status = e.response?.status;
+                const msg = e.response?.data ? JSON.stringify(e.response.data).slice(0, 200) : e.message;
+                results[key] = { ok: false, status, error: msg };
             }
+        }
+        // Also try POST
+        try {
+            const data = await this._post(path, { account_id: this.accountId, page_size: 20 });
+            results['POST'] = { ok: true, sample: JSON.stringify(data).slice(0, 300) };
+        } catch (e) {
+            results['POST'] = { ok: false, status: e.response?.status, error: (e.response?.data ? JSON.stringify(e.response.data) : e.message).slice(0, 200) };
         }
         return results;
     }
