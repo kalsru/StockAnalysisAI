@@ -359,6 +359,45 @@ class WebullService {
         }
     }
 
+    // Probe Webull endpoints for cash transactions / deposits / transfers
+    async probeCashEndpoints() {
+        const candidates = [
+            '/openapi/assets/cash/history',
+            '/openapi/assets/cash',
+            '/openapi/assets/transactions',
+            '/openapi/assets/transaction/history',
+            '/openapi/account/cash/history',
+            '/openapi/account/transactions',
+            '/openapi/account/transfer/history',
+            '/openapi/account/funding/history',
+            '/openapi/account/funds/history',
+            '/openapi/cash/transaction',
+            '/openapi/cash/history',
+            '/openapi/transfer/history',
+            '/openapi/funding/history',
+            '/openapi/trade/cash/history',
+            '/openapi/assets/balance/history',
+            '/openapi/assets/deposit/history',
+            '/openapi/account/deposit/history',
+        ];
+        const results = {};
+        for (const path of candidates) {
+            try {
+                const data = await this._get(path, { account_id: this.accountId, page_size: 10 });
+                results[path] = {
+                    ok: true,
+                    sample: JSON.stringify(data).slice(0, 500),
+                    type: Array.isArray(data) ? `array(${data.length})` : typeof data
+                };
+            } catch (e) {
+                const status = e.response?.status;
+                const errMsg = e.response?.data?.error_msg || e.response?.data?.message || e.message;
+                results[path] = { ok: false, status, error: errMsg };
+            }
+        }
+        return results;
+    }
+
     // ─── Local position file (manual trades) ─────────────────────────────────
     async getLocalPositions() {
         try {

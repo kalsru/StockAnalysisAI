@@ -255,4 +255,14 @@ router.get('/probe', async (req, res) => {
     }
 });
 
+// GET /api/positions/probe-cash — find the cash transaction endpoint
+router.get('/probe-cash', async (req, res) => {
+    try {
+        const results = await webull.probeCashEndpoints();
+        res.json({ ok: true, results });
+    } catch (err) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
 module.exports = router;
