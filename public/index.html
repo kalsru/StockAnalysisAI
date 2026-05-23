@@ -1420,58 +1420,108 @@ async function sendPositionChat() {
     msgs.scrollTop = msgs.scrollHeight;
 }
 
+function pairTradeHistory(history) {
+    // Sort oldest→newest for FIFO matching
+    const sorted = [...history].filter(h => h.source === 'webull' && h.action)
+        .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    // Pending open legs keyed by symbol+type+strike+expiry
+    const opens = {};
+    const paired = [];
+
+    for (const trade of sorted) {
+        const isOption = !!trade.optionType;
+        const key = `${trade.symbol}|${trade.optionType||'STOCK'}|${trade.strike||''}|${trade.expiry||''}`;
+
+        // Options: SELL = open (receive premium), BUY = close (pay to close)
+        // Stock:   BUY = open (pay to own), SELL = close (receive proceeds)
+        const isOpen  = isOption ? trade.action === 'SELL' : trade.action === 'BUY';
+        const isClose = isOption ? trade.action === 'BUY'  : trade.action === 'SELL';
+
+        if (isOpen) {
+            if (!opens[key]) opens[key] = [];
+            opens[key].push({ ...trade });
+        } else if (isClose && opens[key]?.length) {
+            const open = opens[key].shift();
+            const mult = isOption ? 100 : 1;
+            // For options: earned (sell) - paid (buy). For stock: received (sell) - cost (buy)
+            const pnl = isOption
+                ? (open.price - trade.price) * trade.qty * mult
+                : (trade.price - open.price) * trade.qty * mult;
+            paired.push({
+                ...trade,
+                openDate:  open.date,
+                openPrice: open.price,
+                realizedPnl: parseFloat(pnl.toFixed(2)),
+                detail: isOption ? `${trade.optionType} $${trade.strike}${trade.expiry?' exp '+trade.expiry:''}` : 'STOCK'
+            });
+        } else {
+            // Unmatched (still open or open leg not in window)
+            paired.push({ ...trade, openDate: null, openPrice: null, realizedPnl: null,
+                detail: trade.optionType ? `${trade.optionType} $${trade.strike}${trade.expiry?' exp '+trade.expiry:''}` : 'STOCK' });
+        }
+    }
+    // Remaining unmatched opens
+    for (const key in opens) {
+        for (const open of opens[key]) {
+            paired.push({ ...open, openDate: open.date, openPrice: null, realizedPnl: null,
+                detail: open.optionType ? `${open.optionType} $${open.strike}${open.expiry?' exp '+open.expiry:''}` : 'STOCK' });
+        }
+    }
+    return paired.sort((a, b) => new Date(b.date) - new Date(a.date));
+}
+
 function renderHistoryPositions(history) {
     if (!history.length) {
         $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">No trade history found. Filled orders from your Webull account will appear here.</div>';
         return;
     }
-    // Compute running P&L oldest→newest, then display newest first
-    const chronological = [...history].reverse();
+
+    const paired = pairTradeHistory(history);
+
+    // Running equity P&L oldest→newest (only realized round-trips)
     let running = 0;
-    const withPnl = chronological.map(h => {
-        const isLive = h.source === 'webull' && h.action;
-        // SELL = money received (+), BUY = money paid (-)
-        const signed = isLive ? (h.action === 'SELL' ? h.total : -h.total) : (h.pnl || 0);
-        running += signed;
-        return { ...h, tradePnl: signed, runningTotal: running };
+    const withRunning = [...paired].reverse().map(h => {
+        if (h.realizedPnl !== null) running += h.realizedPnl;
+        return { ...h, runningTotal: running };
     });
 
-    const rows = [...withPnl].reverse().map(h => {
-        const isLive = h.source === 'webull' && h.action;
-        const date = h.date || h.closeDate || h.openDate || '--';
-        const optionDetail = h.strike ? ` · ${h.optionType||''} $${h.strike}${h.expiry ? ' exp '+h.expiry : ''}` : '';
-        const pnlClr = h.tradePnl >= 0 ? 'var(--green)' : 'var(--red)';
-        const runClr = h.runningTotal >= 0 ? 'var(--green)' : 'var(--red)';
-        const pnlStr = `${h.tradePnl >= 0 ? '+' : ''}$${fmt(Math.abs(h.tradePnl))}`;
-        const runStr = `${h.runningTotal >= 0 ? '+' : '-'}$${fmt(Math.abs(h.runningTotal))}`;
-
-        if (isLive) {
-            const aBg = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
-            const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
-            return `<tr>
-                <td class="text-left"><strong>${h.symbol}</strong></td>
-                <td><span class="badge" style="background:${aBg};color:${aClr}">${h.action}</span></td>
-                <td class="text-left" style="color:var(--text2);font-size:0.75rem">${optionDetail||'—'}</td>
-                <td style="color:var(--text2)">${h.qty}</td>
-                <td style="font-weight:600">$${fmt(h.price)}</td>
-                <td style="color:${pnlClr};font-weight:700">${pnlStr}</td>
-                <td style="color:${runClr};font-weight:700">${runStr}</td>
-                <td style="color:var(--text3)">${date}</td>
-            </tr>`;
-        }
+    const rows = [...withRunning].reverse().map(h => {
+        const pnl = h.realizedPnl;
+        const pnlStr = pnl !== null
+            ? `<span style="color:${pnl>=0?'var(--green)':'var(--red)'};font-weight:700">${pnl>=0?'+':''}$${fmt(Math.abs(pnl))}</span>`
+            : `<span style="color:var(--text3)">open</span>`;
+        const run = h.runningTotal;
+        const runStr = `<span style="color:${run>=0?'var(--green)':'var(--red)'};font-weight:700">${run>=0?'+':''}$${fmt(Math.abs(run))}</span>`;
+        const closeDate = h.date || '--';
+        const openDate  = h.openDate || '—';
+        const aBg  = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
+        const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
         return `<tr>
             <td class="text-left"><strong>${h.symbol}</strong></td>
-            <td><span class="badge badge-purple">CLOSED</span></td>
-            <td class="text-left" style="color:var(--text2);font-size:0.75rem">${(h.type||'').replace(/_/g,' ')}</td>
-            <td style="color:var(--text2)">—</td><td>—</td>
-            <td style="color:${pnlClr};font-weight:700">${pnlStr}</td>
-            <td style="color:${runClr};font-weight:700">${runStr}</td>
-            <td style="color:var(--text3)">${date}</td>
+            <td class="text-left" style="color:var(--text2);font-size:0.75rem">${h.detail||'—'}</td>
+            <td style="color:var(--text2)">${h.qty}</td>
+            <td style="font-weight:600">$${fmt(h.openPrice||0)}</td>
+            <td style="font-weight:600">$${fmt(h.price)}</td>
+            <td>${pnlStr}</td>
+            <td>${runStr}</td>
+            <td style="color:var(--text3);font-size:0.75rem">${openDate}</td>
+            <td style="color:var(--text3);font-size:0.75rem">${closeDate}</td>
         </tr>`;
     }).join('');
     $('positions-history-wrap').innerHTML = `
         <table>
-            <thead><tr><th class="text-left">Symbol</th><th>Action</th><th class="text-left">Detail</th><th>Qty</th><th>Price</th><th>Trade P&L</th><th>Running Total</th><th>Date</th></tr></thead>
+            <thead><tr>
+                <th class="text-left">Symbol</th>
+                <th class="text-left">Detail</th>
+                <th>Qty</th>
+                <th>Buy Price</th>
+                <th>Sell Price</th>
+                <th>Trade P&L</th>
+                <th>Running Equity</th>
+                <th>Date Opened</th>
+                <th>Date Closed</th>
+            </tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
 }
