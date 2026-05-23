@@ -1434,12 +1434,17 @@ async function renderHistoryPositions(history) {
     let totalIn = 0, totalOut = 0;
     let stockBuyTotal = 0, stockSellTotal = 0;
     let optPremiumIn = 0, optPremiumOut = 0;
+    // Running option P&L: cumulative net premium from option trades only.
+    // Stock buys/sells are capital movements (not P&L) so excluded.
+    // Running equity = startingEquity + runningOptPnl at each row.
+    let runningOptPnl = 0;
 
     const processed = chrono.map(t => {
         runningCash += t.cashFlow;
         if (t.cashFlow >= 0) totalIn += t.cashFlow; else totalOut += Math.abs(t.cashFlow);
 
         // Categorize cash by stock vs options for the summary
+        const isStockMove = t.instrumentType === 'EQUITY' || t.strategy === 'STOCK';
         if (t.strategy === 'STOCK') {
             if (t.action === 'BUY')  stockBuyTotal  += Math.abs(t.cashFlow);
             else                     stockSellTotal += t.cashFlow;
@@ -1453,7 +1458,11 @@ async function renderHistoryPositions(history) {
             else                 optPremiumOut += Math.abs(t.cashFlow);
         }
 
-        return { ...t, runningCash };
+        // Only non-stock trades contribute to option P&L running total
+        const tradePnl = isStockMove ? null : t.cashFlow;
+        if (!isStockMove) runningOptPnl += t.cashFlow;
+
+        return { ...t, runningCash, tradePnl, runningOptPnl };
     });
 
     // Opening + current equity from positions API
@@ -1535,11 +1544,24 @@ async function renderHistoryPositions(history) {
 
         const totalCell = `<span style="font-weight:600">$${fmt(h.total)}</span>`;
 
+        // Trade P&L (options only; stock moves show as —)
+        const tradePnlCell = h.tradePnl === null
+            ? `<span style="color:var(--text3)">—</span>`
+            : `<span style="font-weight:600;color:${h.tradePnl>=0?'var(--green)':'var(--red)'}">${h.tradePnl>=0?'+':'-'}$${fmt(Math.abs(h.tradePnl))}</span>`;
+
+        // Running equity = startingEquity + cumulative option P&L at this point in time
+        const runEq = (startingEquity !== null) ? (startingEquity + h.runningOptPnl) : h.runningOptPnl;
+        const runningEquityCell = h.tradePnl === null
+            ? `<span style="color:var(--text3)">—</span>`
+            : `<span style="font-weight:700;color:var(--accent2)">$${fmt(runEq)}</span>`;
+
         return `<tr>
             <td><span style="background:${stratBg};color:${stratColor};font-size:0.68rem;padding:2px 6px;border-radius:4px;white-space:nowrap">${h.strategy}</span></td>
             <td class="text-left">${legDetail}</td>
             <td style="font-weight:600">$${fmt(h.price)}</td>
             <td>${totalCell}</td>
+            <td>${tradePnlCell}</td>
+            <td style="font-size:0.75rem;font-variant-numeric:tabular-nums">${runningEquityCell}</td>
             <td style="font-size:0.7rem;color:${intentColor}">${intentLabel}</td>
             <td style="color:var(--text3);font-size:0.7rem">${h.date}</td>
         </tr>`;
@@ -1581,8 +1603,10 @@ async function renderHistoryPositions(history) {
             <thead><tr>
                 <th>Strategy</th>
                 <th class="text-left">Legs</th>
-                <th>Net Price /sh</th>
+                <th>Net Price</th>
                 <th>Total</th>
+                <th>Trade P&L</th>
+                <th>Running Equity</th>
                 <th>Intent</th>
                 <th>Date</th>
             </tr></thead>
