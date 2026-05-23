@@ -1437,6 +1437,15 @@ function renderHistoryPositions(history) {
 
     const processed = chrono.map(t => {
         let tradePnl = 0, openDate = null, hasMatch = false;
+        totalCashFlow += t.cashFlow;
+
+        // Only do per-leg P&L tracking for STOCK and SINGLE-leg option trades.
+        // Multi-leg combos (VERTICAL, CALENDAR, COVERED_STOCK) have a NET combo price
+        // that can't be cleanly split per leg.
+        const isMultiLeg = ['VERTICAL', 'CALENDAR', 'COVERED_STOCK'].includes(t.strategy);
+        if (isMultiLeg) {
+            return { ...t, tradePnl: null, openDate: null, runningPnl };
+        }
 
         // Process each leg
         for (const leg of (t.legs || [])) {
@@ -1528,7 +1537,6 @@ function renderHistoryPositions(history) {
             }
         }
 
-        totalCashFlow += t.cashFlow;
         if (hasMatch) runningPnl += tradePnl;
 
         return { ...t, tradePnl: hasMatch ? parseFloat(tradePnl.toFixed(2)) : null, openDate, runningPnl };
@@ -1554,12 +1562,16 @@ function renderHistoryPositions(history) {
         const aBg  = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
         const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
 
-        // Build leg detail
+        // Build leg detail — show share equivalents for option legs (contract × 100 = shares)
         const legDetail = (h.legs || []).map(l => {
+            const sideClr = l.side === 'BUY' ? 'var(--green)' : 'var(--red)';
             if (l.instrumentType === 'EQUITY') {
-                return `<div style="font-size:0.7rem;color:var(--text2)">${l.side} ${fmt(l.qty)} sh</div>`;
+                return `<div style="font-size:0.72rem"><span style="color:${sideClr};font-weight:600">${l.side}</span> <strong>${fmt(l.qty)} sh</strong></div>`;
             }
-            return `<div style="font-size:0.7rem;color:var(--text2)">${l.side} ${l.qty} ${l.optionType} $${l.strike} ${l.expiry}</div>`;
+            const shares = l.qty * 100;
+            return `<div style="font-size:0.72rem">
+                <span style="color:${sideClr};font-weight:600">${l.side}</span> <strong>${l.qty}c</strong> <span style="color:var(--text3)">(${fmt(shares)} sh)</span> ${l.optionType} <strong>$${l.strike}</strong> <span style="color:var(--text3)">exp ${l.expiry}</span>
+            </div>`;
         }).join('');
 
         const intentLabel = h.intent ? h.intent.replace(/_/g,' ') : '';
