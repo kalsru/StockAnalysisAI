@@ -1420,7 +1420,7 @@ async function sendPositionChat() {
     msgs.scrollTop = msgs.scrollHeight;
 }
 
-function renderHistoryPositions(history) {
+async function renderHistoryPositions(history) {
     if (!history.length) {
         $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">No trade history found.</div>';
         return;
@@ -1463,6 +1463,20 @@ function renderHistoryPositions(history) {
         openPositionValue = _chatPositions.reduce((s, p) => s + (p.marketValue || 0), 0);
         unrealizedPnl     = _chatPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
     }
+
+    // Fetch live balance for margin / net equity calculation
+    let netLiquidation = null, marginUsed = 0, cashBalance = 0;
+    try {
+        const summaryRes = await fetch('/api/analytics/summary');
+        const summaryData = await summaryRes.json();
+        if (summaryData.ok && summaryData.data) {
+            netLiquidation = summaryData.data.netLiquidation;
+            cashBalance    = summaryData.data.cashBalance || 0;
+            // Negative cash balance means margin loan
+            marginUsed     = cashBalance < 0 ? Math.abs(cashBalance) : (summaryData.data.maintenanceMargin || 0);
+        }
+    } catch { /* keep defaults */ }
+    const netEquity = netLiquidation !== null ? netLiquidation : (openPositionValue - marginUsed);
 
     // Build rows (newest first)
     const rows = [...processed].reverse().map(h => {
@@ -1515,7 +1529,29 @@ function renderHistoryPositions(history) {
     const accountEquityChange = runningCash + unrealizedPnl;
 
     $('positions-history-wrap').innerHTML = `
-        <div style="display:grid;grid-template-columns:repeat(2,1fr) repeat(3,1fr);gap:10px;margin-bottom:16px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
+        <!-- Equity breakdown -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
+            <div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Open Position Value</div>
+                <div style="font-weight:700;color:var(--accent2);font-size:1.05rem">$${fmt(openPositionValue)}</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Margin / Loan</div>
+                <div style="font-weight:700;color:var(--red);font-size:1.05rem">-$${fmt(marginUsed)}</div>
+            </div>
+            <div style="border-left:2px solid var(--border);padding-left:12px">
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Equity</div>
+                <div style="font-weight:800;color:var(--green);font-size:1.15rem">$${fmt(netEquity)}</div>
+                <div style="font-size:0.65rem;color:var(--text3);margin-top:2px">Open − Margin</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Unrealized P&L</div>
+                <div style="font-weight:700;color:${unrealizedPnl>=0?'var(--green)':'var(--red)'};font-size:1.05rem">${unrealizedPnl>=0?'+':'-'}$${fmt(Math.abs(unrealizedPnl))}</div>
+            </div>
+        </div>
+
+        <!-- Cash flow breakdown -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
             <div>
                 <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Stock Bought</div>
                 <div style="font-weight:700;color:var(--red)">-$${fmt(stockBuyTotal)}</div>
@@ -1531,11 +1567,6 @@ function renderHistoryPositions(history) {
             <div>
                 <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Cash Flow</div>
                 <div style="font-weight:700;color:${runningCash>=0?'var(--green)':'var(--red)'}">${runningCash>=0?'+':'-'}$${fmt(Math.abs(runningCash))}</div>
-            </div>
-            <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Current Open Equity</div>
-                <div style="font-weight:700;color:var(--accent2)">$${fmt(openPositionValue)}</div>
-                <div style="font-size:0.65rem;color:${unrealizedPnl>=0?'var(--green)':'var(--red)'};margin-top:2px">Unrealized: ${unrealizedPnl>=0?'+':'-'}$${fmt(Math.abs(unrealizedPnl))}</div>
             </div>
         </div>
         <table>
