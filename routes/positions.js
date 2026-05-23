@@ -66,6 +66,8 @@ function flattenWebullCombos(combos) {
             const filledQty   = parseFloat(o.filled_quantity || o.quantity || optLeg?.quantity || 0);
             const filledPrice = parseFloat(o.avg_filled_price || o.filled_price || o.price || 0);
             const action = (o.side || o.action || '').toUpperCase();
+            const isOption = !!optLeg;
+            const multiplier = isOption ? 100 : 1;
             trades.push({
                 id: o.order_id || combo.combo_order_id || String(Date.now()),
                 symbol: o.symbol || '',
@@ -74,7 +76,8 @@ function flattenWebullCombos(combos) {
                 status: 'FILLED',
                 qty: filledQty,
                 price: filledPrice,
-                total: parseFloat((filledQty * filledPrice).toFixed(2)),
+                multiplier,
+                total: parseFloat((filledQty * filledPrice * multiplier).toFixed(2)),
                 date: (() => {
                     const raw = o.filled_time || o.update_time || o.create_time;
                     if (!raw) return null;
