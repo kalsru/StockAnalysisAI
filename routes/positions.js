@@ -53,45 +53,56 @@ function normalizeWebullPosition(p) {
     };
 }
 
-// Flatten Webull combo order history into individual trade records
-// Response shape: [{combo_order_id, combo_type, orders:[{symbol,side,status,legs:[...]}]}]
+// Flatten Webull combo order history into individual trade records with full leg detail
+// Response shape: [{combo_order_id, combo_type, orders:[{symbol,side,status,instrument_type,option_strategy,position_intent,legs:[...]}]}]
 function flattenWebullCombos(combos) {
     const trades = [];
     for (const combo of combos) {
         const subOrders = Array.isArray(combo.orders) ? combo.orders : [];
         for (const o of subOrders) {
             if ((o.status || '').toUpperCase() !== 'FILLED') continue;
-            const legs = Array.isArray(o.legs) ? o.legs : [];
-            const optLeg = legs.find(l => l.option_type) || null;
-            const filledQty   = parseFloat(o.filled_quantity || o.quantity || optLeg?.quantity || 0);
-            const filledPrice = parseFloat(o.avg_filled_price || o.filled_price || o.price || 0);
-            const action = (o.side || o.action || '').toUpperCase();
-            const isOption = !!optLeg;
-            const multiplier = isOption ? 100 : 1;
+
+            const isEquity = o.instrument_type === 'EQUITY';
+            const strategy = o.option_strategy || (isEquity ? 'STOCK' : 'SINGLE');
+            const intent   = o.position_intent || (isEquity ? (o.side === 'BUY' ? 'BUY_TO_OPEN' : 'SELL_TO_CLOSE') : null);
+            const filledQty   = parseFloat(o.filled_quantity || o.total_quantity || 0);
+            const filledPrice = parseFloat(o.filled_price || o.avg_filled_price || 0);
+            // Total cash flow: equity uses qty*price, options use qty*price*100 (contract multiplier)
+            const totalCash = isEquity
+                ? filledQty * filledPrice
+                : filledQty * filledPrice * 100;
+
+            const legs = (o.legs || []).map(l => ({
+                qty: parseFloat(l.quantity || 0),
+                side: (l.side || '').toUpperCase(),
+                instrumentType: l.option_type ? 'OPTION' : 'EQUITY',
+                optionType: l.option_type || null,
+                strike: l.strike_price ? parseFloat(l.strike_price) : null,
+                expiry: l.option_expire_date || null,
+                multiplier: l.option_contract_multiplier ? parseInt(l.option_contract_multiplier) : 1
+            }));
+
+            const filledMs = parseInt(o.filled_time || 0);
             trades.push({
-                id: o.order_id || combo.combo_order_id || String(Date.now()),
+                id: o.order_id || combo.combo_order_id,
                 symbol: o.symbol || '',
-                action,
-                comboType: combo.combo_type || 'NORMAL',
-                status: 'FILLED',
+                instrumentType: o.instrument_type,
+                strategy,
+                action: (o.side || '').toUpperCase(),
+                intent,                                  // SELL_TO_OPEN, BUY_TO_CLOSE, etc.
                 qty: filledQty,
                 price: filledPrice,
-                multiplier,
-                total: parseFloat((filledQty * filledPrice * multiplier).toFixed(2)),
-                date: (() => {
-                    const raw = o.filled_time || o.update_time || o.create_time;
-                    if (!raw) return null;
-                    const ms = typeof raw === 'number' ? raw : parseInt(raw);
-                    return isNaN(ms) ? raw : new Date(ms).toISOString().split('T')[0];
-                })(),
-                optionType: optLeg?.option_type || null,
-                strike: optLeg?.option_exercise_price ? parseFloat(optLeg.option_exercise_price) : null,
-                expiry: optLeg?.option_expire_date || null,
+                total: parseFloat(totalCash.toFixed(2)),
+                cashFlow: parseFloat(((o.side === 'SELL' ? 1 : -1) * totalCash).toFixed(2)),
+                date: filledMs ? new Date(filledMs).toISOString().split('T')[0] : null,
+                datetime: filledMs ? new Date(filledMs).toISOString() : null,
+                filledMs,
+                legs,
                 source: 'webull'
             });
         }
     }
-    return trades.sort((a, b) => new Date(b.date) - new Date(a.date));
+    return trades.sort((a, b) => b.filledMs - a.filledMs);
 }
 
 // GET /api/positions

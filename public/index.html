@@ -1422,158 +1422,197 @@ async function sendPositionChat() {
 
 function renderHistoryPositions(history) {
     if (!history.length) {
-        $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">No trade history found. Filled orders from your Webull account will appear here.</div>';
+        $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">No trade history found.</div>';
         return;
     }
 
-    // Categorize each trade
-    // multiplier=100 + optionType + price > $30 = stock rolled (sold/bought at stock price, not option premium)
-    const STOCK_PRICE_THRESHOLD = 30;
-    const categorized = history.map(h => {
-        let tradeType, shares;
-        if (!h.optionType) {
-            tradeType = 'STOCK';
-            shares = h.qty;                     // qty already in shares
-        } else if (h.price > STOCK_PRICE_THRESHOLD) {
-            tradeType = 'STOCK_ROLL';           // stock sold/bought as part of a covered stock roll
-            shares = h.qty * 100;               // contracts → shares (multiplier=100 in backend)
-        } else {
-            tradeType = 'OPTION';               // covered call premium income/cost
-            shares = h.qty;
-        }
-        return { ...h, tradeType, shares };
-    });
+    // Chronological for P&L tracking
+    const chrono = [...history].sort((a, b) => (a.filledMs || 0) - (b.filledMs || 0));
 
-    // Sort oldest→newest for running totals
-    const byDate = [...categorized].sort((a, b) => new Date(a.date) - new Date(b.date));
+    // Position trackers (use legs to track positions accurately)
+    const stockLots = {};   // symbol → [{shares, price, date}]
+    const optLots   = {};   // key (symbol|type|strike|expiry|side) → [{qty, price, date}]
+    let runningPnl  = 0;
+    let totalCashFlow = 0;
 
-    // Track stock lots per symbol for P&L pairing (FIFO)
-    const stockLots = {}; // symbol → [{price, shares, date}]
+    const processed = chrono.map(t => {
+        let tradePnl = 0, openDate = null, hasMatch = false;
 
-    // Track option open lots per symbol+expiry for P&L pairing
-    const optionLots = {}; // symbol+expiry → [{price, qty, date}]
-
-    let runningPnl = 0;
-    const withPnl = byDate.map(h => {
-        const sym = h.symbol;
-        let tradePnl = null, openDate = null;
-
-        if (h.tradeType === 'STOCK' || h.tradeType === 'STOCK_ROLL') {
-            if (!stockLots[sym]) stockLots[sym] = [];
-            if (h.action === 'BUY') {
-                // Add shares to lot inventory
-                stockLots[sym].push({ price: h.price, shares: h.shares, date: h.date });
-            } else if (h.action === 'SELL') {
-                // SELL (roll-out or close) — match FIFO against existing lots
-                let remaining = h.shares;
-                let costBasis = 0, costShares = 0;
-                while (remaining > 0 && stockLots[sym].length) {
-                    const lot = stockLots[sym][0];
-                    const take = Math.min(remaining, lot.shares);
-                    costBasis += take * lot.price;
-                    costShares += take;
-                    remaining -= take;
-                    lot.shares -= take;
-                    if (!openDate) openDate = lot.date;
-                    if (lot.shares <= 0) stockLots[sym].shift();
+        // Process each leg
+        for (const leg of (t.legs || [])) {
+            if (leg.instrumentType === 'EQUITY') {
+                if (!stockLots[t.symbol]) stockLots[t.symbol] = [];
+                if (leg.side === 'BUY') {
+                    stockLots[t.symbol].push({ shares: leg.qty, price: t.price, date: t.date });
+                } else if (leg.side === 'SELL') {
+                    let rem = leg.qty, costBasis = 0, costShares = 0;
+                    while (rem > 0 && stockLots[t.symbol].length) {
+                        const lot = stockLots[t.symbol][0];
+                        const take = Math.min(rem, lot.shares);
+                        costBasis += take * lot.price;
+                        costShares += take;
+                        rem -= take;
+                        lot.shares -= take;
+                        if (!openDate) openDate = lot.date;
+                        if (lot.shares <= 0) stockLots[t.symbol].shift();
+                    }
+                    if (costShares > 0) {
+                        tradePnl += (t.price - costBasis / costShares) * costShares;
+                        hasMatch = true;
+                    }
                 }
-                if (costShares > 0) {
-                    tradePnl = parseFloat(((h.price - (costBasis / costShares)) * costShares).toFixed(2));
-                    runningPnl += tradePnl;
+            } else if (leg.instrumentType === 'OPTION') {
+                // Key includes the SIDE we're tracking (short calls vs long calls)
+                // SELL_TO_OPEN → short, BUY_TO_CLOSE → close short
+                // BUY_TO_OPEN  → long,  SELL_TO_CLOSE → close long
+                const isOpen  = (leg.side === 'SELL' && t.intent !== 'SELL_TO_CLOSE') || (leg.side === 'BUY' && t.intent === 'BUY_TO_OPEN');
+                const isClose = !isOpen;
+                // For multi-leg combos, derive intent per leg from option_strategy semantics:
+                // COVERED_STOCK close: equity SELL + option BUY = closing short calls
+                // VERTICAL credit: option SELL + option BUY = opening short spread
+                // CALENDAR: option SELL (back) + option BUY (front) = roll
+                // Simpler: track by side. SELL=opens short, BUY=closes short OR opens long
+                const trackKey = `${t.symbol}|${leg.optionType}|${leg.strike}|${leg.expiry}`;
+                if (!optLots[trackKey]) optLots[trackKey] = { short: [], long: [] };
+
+                // For options leg, the price per leg is the combo's filled_price for SINGLE,
+                // but for multi-leg (VERTICAL/CALENDAR/COVERED_STOCK) we can't split — use combo price.
+                const legPrice = t.price;
+
+                if (leg.side === 'SELL') {
+                    // Either opening short OR closing long
+                    if (optLots[trackKey].long.length) {
+                        // Close long lot first
+                        let rem = leg.qty, costBasis = 0, q = 0;
+                        while (rem > 0 && optLots[trackKey].long.length) {
+                            const lot = optLots[trackKey].long[0];
+                            const take = Math.min(rem, lot.qty);
+                            costBasis += take * lot.price;
+                            q += take;
+                            rem -= take;
+                            lot.qty -= take;
+                            if (!openDate) openDate = lot.date;
+                            if (lot.qty <= 0) optLots[trackKey].long.shift();
+                        }
+                        if (q > 0) {
+                            tradePnl += (legPrice - costBasis / q) * q * 100;
+                            hasMatch = true;
+                        }
+                        if (rem > 0) optLots[trackKey].short.push({ qty: rem, price: legPrice, date: t.date });
+                    } else {
+                        optLots[trackKey].short.push({ qty: leg.qty, price: legPrice, date: t.date });
+                    }
+                } else if (leg.side === 'BUY') {
+                    // Either closing short OR opening long
+                    if (optLots[trackKey].short.length) {
+                        let rem = leg.qty, premIn = 0, q = 0;
+                        while (rem > 0 && optLots[trackKey].short.length) {
+                            const lot = optLots[trackKey].short[0];
+                            const take = Math.min(rem, lot.qty);
+                            premIn += take * lot.price;
+                            q += take;
+                            rem -= take;
+                            lot.qty -= take;
+                            if (!openDate) openDate = lot.date;
+                            if (lot.qty <= 0) optLots[trackKey].short.shift();
+                        }
+                        if (q > 0) {
+                            tradePnl += (premIn / q - legPrice) * q * 100;
+                            hasMatch = true;
+                        }
+                        if (rem > 0) optLots[trackKey].long.push({ qty: rem, price: legPrice, date: t.date });
+                    } else {
+                        optLots[trackKey].long.push({ qty: leg.qty, price: legPrice, date: t.date });
+                    }
                 }
-                // If no lots found (stock held before history window), P&L stays null
             }
-        } else if (h.tradeType === 'OPTION') {
-            const key = `${sym}|${h.expiry||''}`;
-            if (!optionLots[key]) optionLots[key] = [];
-            if (h.action === 'SELL') {
-                // Sell to open — record lot
-                optionLots[key].push({ price: h.price, qty: h.qty, date: h.date });
-            } else if (h.action === 'BUY' && optionLots[key].length) {
-                // Buy to close — match against open sell lot (FIFO)
-                let remaining = h.qty;
-                let totalReceived = 0, totalQty = 0;
-                while (remaining > 0 && optionLots[key].length) {
-                    const lot = optionLots[key][0];
-                    const take = Math.min(remaining, lot.qty);
-                    totalReceived += take * lot.price;
-                    totalQty += take;
-                    remaining -= take;
-                    lot.qty -= take;
-                    if (!openDate) openDate = lot.date;
-                    if (lot.qty <= 0) optionLots[key].shift();
-                }
-                if (totalQty > 0) {
-                    tradePnl = parseFloat(((totalReceived / totalQty - h.price) * h.qty * 100).toFixed(2));
-                    runningPnl += tradePnl;
-                }
-            }
         }
 
-        return { ...h, tradePnl, openDate, runningPnl };
-    });
+        totalCashFlow += t.cashFlow;
+        if (hasMatch) runningPnl += tradePnl;
 
-    // Summary stats
-    const totalOptPremium = categorized.filter(h => h.tradeType === 'OPTION' && h.action === 'SELL')
-        .reduce((s, h) => s + h.total, 0);
-    const totalOptCost    = categorized.filter(h => h.tradeType === 'OPTION' && h.action === 'BUY')
-        .reduce((s, h) => s + h.total, 0);
-    const totalStockIn    = categorized.filter(h => (h.tradeType === 'STOCK' || h.tradeType === 'STOCK_ROLL') && h.action === 'BUY')
-        .reduce((s, h) => s + h.total, 0);
-    const totalStockOut   = categorized.filter(h => (h.tradeType === 'STOCK' || h.tradeType === 'STOCK_ROLL') && h.action === 'SELL')
-        .reduce((s, h) => s + h.total, 0);
-    const netCapital      = totalStockIn - totalStockOut; // net capital still deployed
-    const netPremium      = totalOptPremium - totalOptCost;
+        return { ...t, tradePnl: hasMatch ? parseFloat(tradePnl.toFixed(2)) : null, openDate, runningPnl };
+    });
 
     // Build rows (newest first)
-    const rows = [...withPnl].reverse().map(h => {
-        const typeLabel = h.tradeType === 'STOCK_ROLL' ? 'STOCK ROLL'
-            : h.tradeType === 'OPTION' ? `${h.optionType||'OPTION'}${h.expiry?' '+h.expiry:''}` : 'STOCK';
-        const typeBg = h.tradeType === 'STOCK_ROLL' ? 'rgba(251,191,36,0.15)'
-            : h.tradeType === 'OPTION' ? 'rgba(59,130,246,0.15)' : 'rgba(16,185,129,0.15)';
-        const typeClr = h.tradeType === 'STOCK_ROLL' ? '#fbbf24'
-            : h.tradeType === 'OPTION' ? '#60a5fa' : 'var(--green)';
+    const rows = [...processed].reverse().map(h => {
+        const stratColor = ({
+            COVERED_STOCK: '#a78bfa',
+            VERTICAL:      '#f59e0b',
+            CALENDAR:      '#06b6d4',
+            SINGLE:        '#60a5fa',
+            STOCK:         '#10b981'
+        })[h.strategy] || 'var(--text2)';
+        const stratBg = ({
+            COVERED_STOCK: 'rgba(167,139,250,0.15)',
+            VERTICAL:      'rgba(245,158,11,0.15)',
+            CALENDAR:      'rgba(6,182,212,0.15)',
+            SINGLE:        'rgba(96,165,250,0.15)',
+            STOCK:         'rgba(16,185,129,0.15)'
+        })[h.strategy] || 'rgba(100,100,100,0.15)';
+
         const aBg  = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
         const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
-        const sharesDisplay = h.tradeType === 'STOCK_ROLL' ? `${h.shares} sh` : h.tradeType === 'STOCK' ? `${h.shares} sh` : `${h.qty}c`;
+
+        // Build leg detail
+        const legDetail = (h.legs || []).map(l => {
+            if (l.instrumentType === 'EQUITY') {
+                return `<div style="font-size:0.7rem;color:var(--text2)">${l.side} ${fmt(l.qty)} sh</div>`;
+            }
+            return `<div style="font-size:0.7rem;color:var(--text2)">${l.side} ${l.qty} ${l.optionType} $${l.strike} ${l.expiry}</div>`;
+        }).join('');
+
+        const intentLabel = h.intent ? h.intent.replace(/_/g,' ') : '';
+        const intentColor = (h.intent||'').includes('OPEN') ? 'var(--accent2)' : (h.intent||'').includes('CLOSE') ? '#f59e0b' : 'var(--text3)';
+
         const pnlCell = h.tradePnl !== null
             ? `<span style="color:${h.tradePnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.tradePnl>=0?'+':''}$${fmt(Math.abs(h.tradePnl))}</span>`
             : '<span style="color:var(--text3)">—</span>';
-        const runCell = h.tradePnl !== null
-            ? `<span style="color:${h.runningPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.runningPnl>=0?'+':''}$${fmt(Math.abs(h.runningPnl))}</span>`
-            : '';
+        const runCell = `<span style="color:${h.runningPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.runningPnl>=0?'+':''}$${fmt(Math.abs(h.runningPnl))}</span>`;
+        const cashCell = `<span style="color:${h.cashFlow>=0?'var(--green)':'var(--red)'}">${h.cashFlow>=0?'+':'-'}$${fmt(Math.abs(h.cashFlow))}</span>`;
+
         return `<tr>
-            <td class="text-left"><strong>${h.symbol}</strong></td>
-            <td><span class="badge" style="background:${aBg};color:${aClr};font-size:0.7rem">${h.action}</span></td>
-            <td><span style="background:${typeBg};color:${typeClr};font-size:0.68rem;padding:2px 6px;border-radius:4px">${typeLabel}</span></td>
-            <td style="color:var(--text2)">${sharesDisplay}</td>
+            <td><span style="background:${stratBg};color:${stratColor};font-size:0.68rem;padding:2px 6px;border-radius:4px;white-space:nowrap">${h.strategy}</span></td>
+            <td class="text-left">${legDetail}</td>
             <td style="font-weight:600">$${fmt(h.price)}</td>
-            <td style="color:var(--text2)">$${fmt(h.total)}</td>
+            <td>${cashCell}</td>
+            <td style="font-size:0.7rem;color:${intentColor}">${intentLabel}</td>
             <td>${pnlCell}</td>
             <td>${runCell}</td>
-            <td style="color:var(--text3);font-size:0.75rem">${h.openDate||'—'}</td>
-            <td style="color:var(--text3);font-size:0.75rem">${h.date||'—'}</td>
+            <td style="color:var(--text3);font-size:0.7rem">${h.openDate||'—'}</td>
+            <td style="color:var(--text3);font-size:0.7rem">${h.date}</td>
         </tr>`;
     }).join('');
 
-    const finalRunning = withPnl[withPnl.length - 1]?.runningPnl || 0;
+    // Summary stats — cash deployed in stock currently held
+    const finalRunning = processed[processed.length - 1]?.runningPnl || 0;
+    let openStockValue = 0;
+    for (const sym in stockLots) {
+        for (const lot of stockLots[sym]) openStockValue += lot.shares * lot.price;
+    }
 
     $('positions-history-wrap').innerHTML = `
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
-            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Capital Deployed</div>
-                <div style="font-weight:700;color:var(--red)">-$${fmt(netCapital)}</div></div>
-            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Premium</div>
-                <div style="font-weight:700;color:${netPremium>=0?'var(--green)':'var(--red)'}">${netPremium>=0?'+':''}$${fmt(netPremium)}</div></div>
+            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Cost Basis (Open)</div>
+                <div style="font-weight:700">$${fmt(openStockValue)}</div></div>
+            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Cash Flow</div>
+                <div style="font-weight:700;color:${totalCashFlow>=0?'var(--green)':'var(--red)'}">${totalCashFlow>=0?'+':'-'}$${fmt(Math.abs(totalCashFlow))}</div></div>
             <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Realized P&L</div>
-                <div style="font-weight:700;color:${finalRunning>=0?'var(--green)':'var(--red)'}">${finalRunning>=0?'+':''}$${fmt(Math.abs(finalRunning))}</div></div>
+                <div style="font-weight:700;color:${finalRunning>=0?'var(--green)':'var(--red)'}">${finalRunning>=0?'+':'-'}$${fmt(Math.abs(finalRunning))}</div></div>
             <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Unrealized P&L</div>
                 <div style="font-weight:700;color:var(--green)" id="hist-unrealized">Loading…</div></div>
         </div>
         <table>
             <thead><tr>
-                <th class="text-left">Symbol</th><th>Action</th><th>Type</th><th>Qty</th>
-                <th>Price</th><th>Total</th><th>Trade P&L</th><th>Running P&L</th>
-                <th>Date Opened</th><th>Date</th>
+                <th>Strategy</th>
+                <th class="text-left">Legs</th>
+                <th>Net Price</th>
+                <th>Cash Flow</th>
+                <th>Intent</th>
+                <th>Trade P&L</th>
+                <th>Running P&L</th>
+                <th>Opened</th>
+                <th>Date</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
@@ -1582,8 +1621,10 @@ function renderHistoryPositions(history) {
     if (_chatPositions.length) {
         const unreal = _chatPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
         const el = document.getElementById('hist-unrealized');
-        if (el) el.textContent = `${unreal>=0?'+':''}$${fmt(Math.abs(unreal))}`;
-        if (el) el.style.color = unreal >= 0 ? 'var(--green)' : 'var(--red)';
+        if (el) {
+            el.textContent = `${unreal>=0?'+':'-'}$${fmt(Math.abs(unreal))}`;
+            el.style.color = unreal >= 0 ? 'var(--green)' : 'var(--red)';
+        }
     }
 }
 
