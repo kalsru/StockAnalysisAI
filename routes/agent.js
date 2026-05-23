@@ -110,7 +110,7 @@ router.post('/position-chat', async (req, res) => {
             const lines = [
                 `Symbol: ${p.symbol} | Strategy: ${p.type} | Mkt Value: $${p.marketValue} | Unrealized P&L: ${p.unrealizedPnl >= 0 ? '+' : ''}$${p.unrealizedPnl} (${(p.unrealizedPnlRate * 100).toFixed(2)}%)`
             ];
-            if (Array.isArray(p.legs)) {
+            if (Array.isArray(p.legs) && p.legs.length) {
                 p.legs.forEach(l => {
                     if (l.instrumentType === 'EQUITY') {
                         lines.push(`  STOCK leg: ${p.qty} shares @ cost $${l.costPrice}/sh, last $${l.lastPrice}, unreal P&L $${l.unrealizedPnl}`);
@@ -118,6 +118,10 @@ router.post('/position-chat', async (req, res) => {
                         lines.push(`  OPTION leg: ${l.optionType} strike $${l.strike} exp ${l.expiry}, ${p.contracts} contracts @ cost $${l.costPrice}/contract, last $${l.lastPrice}, unreal P&L $${l.unrealizedPnl}`);
                     }
                 });
+            } else {
+                // No legs array — use top-level fields for context
+                if (p.qty)       lines.push(`  Shares: ${p.qty} @ avg cost $${p.costPrice}/sh`);
+                if (p.contracts) lines.push(`  Contracts: ${p.contracts} @ avg cost $${p.costPrice}/contract`);
             }
             return lines.join('\n');
         }).join('\n\n');

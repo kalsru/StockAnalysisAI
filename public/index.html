@@ -1353,6 +1353,13 @@ async function sendPositionChat() {
     msgs.scrollTop = msgs.scrollHeight;
 
     try {
+        // Refresh live positions at send-time so Claude always has current data
+        try {
+            const pr = await fetch('/api/positions');
+            const pd = await pr.json();
+            if (pd.data?.positions?.length) _chatPositions = pd.data.positions;
+        } catch { /* keep cached positions on error */ }
+
         // Build compact chain context from currently-loaded chain (ATM ±10)
         let chainContext = null;
         if (currentChain && currentChain.rows && currentChain.rows.length) {
@@ -1363,7 +1370,9 @@ async function sendPositionChat() {
             chainContext = {
                 symbol: currentChain.symbol || $('chain-ticker').value,
                 underlyingPrice: S,
-                expiry: currentChain.expiry,
+                expiry: (currentChain.expiry && currentChain.expiry !== 'Loading...')
+                    ? currentChain.expiry
+                    : (currentChain.expiryDates?.[0] || ''),
                 atmIv: currentChain.atmIv,
                 source: currentChain.source,
                 rows: window.map(r => ({
