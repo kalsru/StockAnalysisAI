@@ -103,25 +103,38 @@ router.post('/position-chat', async (req, res) => {
     if (!message && !image) return res.status(400).json({ error: 'Message or image required.' });
     if (!process.env.ANTHROPIC_API_KEY) return res.status(503).json({ error: 'ANTHROPIC_API_KEY not set.' });
 
+    const today = new Date().toISOString().split('T')[0]; // e.g. 2026-05-23
+
     // Build rich position context
     let posContext = 'No open positions.';
     if (positions.length) {
         posContext = positions.map(p => {
-            const lines = [
-                `Symbol: ${p.symbol} | Strategy: ${p.type} | Mkt Value: $${p.marketValue} | Unrealized P&L: ${p.unrealizedPnl >= 0 ? '+' : ''}$${p.unrealizedPnl} (${(p.unrealizedPnlRate * 100).toFixed(2)}%)`
-            ];
+            // Top-level summary — always include strike/expiry/optionType if present at top level
+            let summary = `Symbol: ${p.symbol} | Strategy: ${p.type} | Mkt Value: $${p.marketValue} | Unrealized P&L: ${p.unrealizedPnl >= 0 ? '+' : ''}$${p.unrealizedPnl} (${(p.unrealizedPnlRate * 100).toFixed(2)}%)`;
+            if (p.strike)     summary += ` | Strike: $${p.strike}`;
+            if (p.expiry)     summary += ` | Expiry: ${p.expiry}`;
+            if (p.optionType) summary += ` | Option type: ${p.optionType}`;
+            const lines = [summary];
+
             if (Array.isArray(p.legs) && p.legs.length) {
                 p.legs.forEach(l => {
                     if (l.instrumentType === 'EQUITY') {
                         lines.push(`  STOCK leg: ${p.qty} shares @ cost $${l.costPrice}/sh, last $${l.lastPrice}, unreal P&L $${l.unrealizedPnl}`);
                     } else if (l.instrumentType === 'OPTION') {
-                        lines.push(`  OPTION leg: ${l.optionType} strike $${l.strike} exp ${l.expiry}, ${p.contracts} contracts @ cost $${l.costPrice}/contract, last $${l.lastPrice}, unreal P&L $${l.unrealizedPnl}`);
+                        const expStr = l.expiry || p.expiry || 'unknown';
+                        const dteStr = l.expiry ? ` (${Math.round((new Date(l.expiry) - new Date(today)) / 86400000)} DTE)` : '';
+                        lines.push(`  OPTION leg: ${l.optionType} strike $${l.strike} exp ${expStr}${dteStr}, ${p.contracts} contracts @ cost $${l.costPrice}/contract, last $${l.lastPrice}, unreal P&L $${l.unrealizedPnl}`);
                     }
                 });
             } else {
                 // No legs array — use top-level fields for context
                 if (p.qty)       lines.push(`  Shares: ${p.qty} @ avg cost $${p.costPrice}/sh`);
-                if (p.contracts) lines.push(`  Contracts: ${p.contracts} @ avg cost $${p.costPrice}/contract`);
+                if (p.contracts && p.expiry) {
+                    const dte = Math.round((new Date(p.expiry) - new Date(today)) / 86400000);
+                    lines.push(`  Contracts: ${p.contracts} @ avg cost $${p.costPrice}/contract, expiry ${p.expiry} (${dte} DTE)`);
+                } else if (p.contracts) {
+                    lines.push(`  Contracts: ${p.contracts} @ avg cost $${p.costPrice}/contract`);
+                }
             }
             return lines.join('\n');
         }).join('\n\n');
@@ -155,6 +168,9 @@ ${strikeTable}`;
     }
 
     const systemPrompt = `You are an expert options trading analyst with deep knowledge of risk management, options Greeks, and position management strategies.
+
+TODAY'S DATE: ${today}
+Use this to accurately compute days-to-expiration (DTE) from any expiry dates shown below. Never guess or assume a time frame — calculate it from today.
 
 The user has the following LIVE open positions (data from Webull):
 ${posContext}
