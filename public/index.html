@@ -988,14 +988,30 @@ function renderDashPositions(positions) {
 
 function renderDashHistory(history) {
     $('dash-history-count').textContent = `${history.length} trades`;
-    const rows = history.slice(0, 8).map(h => `
-        <tr>
+    if (!history.length) {
+        $('dash-history').innerHTML = '<div style="padding:16px;text-align:center;color:var(--text3);font-size:0.8rem">No trade history yet</div>';
+        return;
+    }
+    const rows = history.slice(0, 8).map(h => {
+        const isLive = h.source === 'webull' && h.action;
+        const date = (h.date || h.closeDate || h.openDate || '').split('T')[0] || '--';
+        if (isLive) {
+            const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
+            return `<tr>
+                <td class="text-left"><strong>${h.symbol}</strong></td>
+                <td class="text-left" style="font-size:0.75rem;color:var(--text2)">${h.action} ${h.qty} @ $${fmt(h.price)}</td>
+                <td style="font-weight:700;color:${aClr}">$${fmt(h.total)}</td>
+                <td style="color:var(--text3)">${date}</td>
+            </tr>`;
+        }
+        return `<tr>
             <td class="text-left"><strong>${h.symbol}</strong></td>
             <td class="text-left" style="font-size:0.75rem;color:var(--text2)">${(h.type||'').replace(/_/g,' ')}</td>
-            <td style="color:${pnlColor(h.pnl)}; font-weight:700">${(h.pnl||0) >= 0 ? '+' : ''}$${fmt(h.pnl||0)}</td>
-            <td style="color:var(--text3)">${h.closeDate||h.openDate}</td>
-        </tr>`).join('');
-    $('dash-history').innerHTML = `<table><thead><tr><th class="text-left">Symbol</th><th class="text-left">Type</th><th>P&L</th><th>Closed</th></tr></thead><tbody>${rows}</tbody></table>`;
+            <td style="color:${pnlColor(h.pnl)};font-weight:700">${(h.pnl||0)>=0?'+':''}$${fmt(h.pnl||0)}</td>
+            <td style="color:var(--text3)">${date}</td>
+        </tr>`;
+    }).join('');
+    $('dash-history').innerHTML = `<table><thead><tr><th class="text-left">Symbol</th><th class="text-left">Action / Type</th><th>Total</th><th>Date</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 // ────────────────────────────────────────────────
@@ -1406,20 +1422,39 @@ async function sendPositionChat() {
 
 function renderHistoryPositions(history) {
     if (!history.length) {
-        $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">No trade history</div>';
+        $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">No trade history found. Filled orders from your Webull account will appear here.</div>';
         return;
     }
-    const rows = history.map(h => `<tr>
-        <td class="text-left"><strong>${h.symbol}</strong></td>
-        <td class="text-left" style="color:var(--text2);font-size:0.75rem">${(h.type||'').replace(/_/g,' ')}</td>
-        <td style="color:${pnlColor(h.pnl)};font-weight:700">${(h.pnl||0)>=0?'+':''}$${fmt(h.pnl||0)}</td>
-        <td style="color:var(--text2)">${h.openDate||'--'}</td>
-        <td style="color:var(--text2)">${h.closeDate||'--'}</td>
-        <td><span class="badge ${(h.pnl||0)>=0?'badge-green':'badge-red'}">${(h.pnl||0)>=0?'Winner':'Loser'}</span></td>
-    </tr>`).join('');
+    // Supports both Webull live orders (action/qty/price/total/date) and legacy local format (pnl/closeDate)
+    const rows = history.map(h => {
+        const isLive = h.source === 'webull' && h.action;
+        const date = (h.date || h.closeDate || h.openDate || '').split('T')[0] || '--';
+        const optionDetail = h.strike ? ` · ${h.optionType||''} $${h.strike}${h.expiry ? ' exp '+h.expiry : ''}` : '';
+        if (isLive) {
+            const aBg = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
+            const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
+            return `<tr>
+                <td class="text-left"><strong>${h.symbol}</strong></td>
+                <td><span class="badge" style="background:${aBg};color:${aClr}">${h.action}</span></td>
+                <td class="text-left" style="color:var(--text2);font-size:0.75rem">${(h.type||'').replace(/_/g,' ')}${optionDetail}</td>
+                <td style="color:var(--text2)">${h.qty}</td>
+                <td style="font-weight:600">$${fmt(h.price)}</td>
+                <td style="font-weight:700">$${fmt(h.total)}</td>
+                <td style="color:var(--text3)">${date}</td>
+            </tr>`;
+        }
+        return `<tr>
+            <td class="text-left"><strong>${h.symbol}</strong></td>
+            <td><span class="badge badge-purple">CLOSED</span></td>
+            <td class="text-left" style="color:var(--text2);font-size:0.75rem">${(h.type||'').replace(/_/g,' ')}</td>
+            <td style="color:var(--text2)">—</td><td>—</td>
+            <td style="color:${pnlColor(h.pnl)};font-weight:700">${(h.pnl||0)>=0?'+':''}$${fmt(h.pnl||0)}</td>
+            <td style="color:var(--text3)">${date}</td>
+        </tr>`;
+    }).join('');
     $('positions-history-wrap').innerHTML = `
         <table>
-            <thead><tr><th class="text-left">Symbol</th><th class="text-left">Type</th><th>P&L</th><th>Opened</th><th>Closed</th><th>Result</th></tr></thead>
+            <thead><tr><th class="text-left">Symbol</th><th>Action</th><th class="text-left">Type / Detail</th><th>Qty</th><th>Price</th><th>Total</th><th>Date</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
 }

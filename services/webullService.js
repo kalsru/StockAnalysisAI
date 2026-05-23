@@ -330,6 +330,31 @@ class WebullService {
         }
     }
 
+    async getTradeHistory({ pageSize = 100, lastOrderId = '' } = {}) {
+        try {
+            const params = { account_id: this.accountId, page_size: pageSize };
+            if (lastOrderId) params.last_order_id = lastOrderId;
+            const data = await this._get('/openapi/trade/order/list', params);
+            const orders = Array.isArray(data) ? data : (data?.orders || data?.items || []);
+            return { orders, source: 'webull' };
+        } catch (e) {
+            console.error('[Webull] Trade history failed:', e.response?.data || e.message);
+            // Try alternate endpoint shape
+            try {
+                const data2 = await this._get('/openapi/trade/orders', {
+                    account_id: this.accountId,
+                    status: 'Filled',
+                    page_size: pageSize
+                });
+                const orders = Array.isArray(data2) ? data2 : (data2?.orders || data2?.items || []);
+                return { orders, source: 'webull' };
+            } catch (e2) {
+                console.error('[Webull] Trade history alt failed:', e2.response?.data || e2.message);
+                return { orders: [], source: 'error', error: e.message };
+            }
+        }
+    }
+
     // ─── Local position file (manual trades) ─────────────────────────────────
     async getLocalPositions() {
         try {

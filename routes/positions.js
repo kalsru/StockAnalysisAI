@@ -53,12 +53,40 @@ function normalizeWebullPosition(p) {
     };
 }
 
+// Normalize a filled Webull order into trade history format
+function normalizeWebullOrder(o) {
+    const filledQty  = parseFloat(o.filled_quantity || o.quantity || 0);
+    const filledPrice = parseFloat(o.avg_filled_price || o.filled_price || o.price || 0);
+    const action = (o.action || o.side || '').toUpperCase(); // BUY / SELL
+    const symbol = o.ticker?.symbol || o.symbol || '';
+    const optionLeg = Array.isArray(o.legs) ? o.legs[0] : null;
+    return {
+        id: o.order_id || o.id || String(Date.now()),
+        symbol,
+        action,
+        type: o.order_type || o.type || 'MARKET',
+        status: o.status || 'Filled',
+        qty: filledQty,
+        price: filledPrice,
+        total: parseFloat((filledQty * filledPrice).toFixed(2)),
+        date: o.filled_time || o.create_time || o.order_time || null,
+        // option fields (if present)
+        optionType: optionLeg?.option_type || o.option_type || null,
+        strike: optionLeg?.option_exercise_price ? parseFloat(optionLeg.option_exercise_price) : null,
+        expiry: optionLeg?.option_expire_date || o.option_expire_date || null,
+        source: 'webull'
+    };
+}
+
 // GET /api/positions
 router.get('/', async (req, res) => {
     try {
-        // Try live Webull positions first
-        const liveResult = await webull.getAccountPositions();
-        const localData = await webull.getLocalPositions();
+        // Fetch live positions + trade history in parallel
+        const [liveResult, tradeResult, localData] = await Promise.all([
+            webull.getAccountPositions(),
+            webull.getTradeHistory({ pageSize: 100 }),
+            webull.getLocalPositions()
+        ]);
 
         let positions = [];
         let source = 'local';
@@ -67,11 +95,18 @@ router.get('/', async (req, res) => {
             positions = liveResult.positions.map(normalizeWebullPosition);
             source = 'webull';
         } else {
-            // Fall back to local positions
             positions = localData.positions || [];
         }
 
-        // Enrich with current quotes
+        // Build history: prefer live Webull orders, fall back to local file
+        let history = localData.history || [];
+        if (tradeResult.orders && tradeResult.orders.length > 0) {
+            history = tradeResult.orders
+                .map(normalizeWebullOrder)
+                .sort((a, b) => new Date(b.date) - new Date(a.date));
+        }
+
+        // Enrich open positions with current quotes
         const symbolSet = [...new Set(positions.map(p => p.symbol).filter(Boolean))];
         const quotes = {};
         await Promise.all(symbolSet.map(async sym => {
@@ -90,10 +125,25 @@ router.get('/', async (req, res) => {
             ok: true,
             data: {
                 positions,
-                history: localData.history || [],
+                history,
+                historySource: tradeResult.source,
                 source
             }
         });
+    } catch (err) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+// GET /api/positions/history — standalone trade history endpoint
+router.get('/history', async (req, res) => {
+    try {
+        const pageSize = parseInt(req.query.limit) || 100;
+        const result = await webull.getTradeHistory({ pageSize });
+        const history = (result.orders || [])
+            .map(normalizeWebullOrder)
+            .sort((a, b) => new Date(b.date) - new Date(a.date));
+        res.json({ ok: true, data: { history, source: result.source, error: result.error } });
     } catch (err) {
         res.status(500).json({ ok: false, error: err.message });
     }
