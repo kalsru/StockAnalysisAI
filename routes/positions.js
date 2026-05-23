@@ -53,29 +53,37 @@ function normalizeWebullPosition(p) {
     };
 }
 
-// Normalize a filled Webull order into trade history format
-function normalizeWebullOrder(o) {
-    const filledQty  = parseFloat(o.filled_quantity || o.quantity || 0);
-    const filledPrice = parseFloat(o.avg_filled_price || o.filled_price || o.price || 0);
-    const action = (o.action || o.side || '').toUpperCase(); // BUY / SELL
-    const symbol = o.ticker?.symbol || o.symbol || '';
-    const optionLeg = Array.isArray(o.legs) ? o.legs[0] : null;
-    return {
-        id: o.order_id || o.id || String(Date.now()),
-        symbol,
-        action,
-        type: o.order_type || o.type || 'MARKET',
-        status: o.status || 'Filled',
-        qty: filledQty,
-        price: filledPrice,
-        total: parseFloat((filledQty * filledPrice).toFixed(2)),
-        date: o.filled_time || o.create_time || o.order_time || null,
-        // option fields (if present)
-        optionType: optionLeg?.option_type || o.option_type || null,
-        strike: optionLeg?.option_exercise_price ? parseFloat(optionLeg.option_exercise_price) : null,
-        expiry: optionLeg?.option_expire_date || o.option_expire_date || null,
-        source: 'webull'
-    };
+// Flatten Webull combo order history into individual trade records
+// Response shape: [{combo_order_id, combo_type, orders:[{symbol,side,status,legs:[...]}]}]
+function flattenWebullCombos(combos) {
+    const trades = [];
+    for (const combo of combos) {
+        const subOrders = Array.isArray(combo.orders) ? combo.orders : [];
+        for (const o of subOrders) {
+            if ((o.status || '').toUpperCase() !== 'FILLED') continue;
+            const legs = Array.isArray(o.legs) ? o.legs : [];
+            const optLeg = legs.find(l => l.option_type) || null;
+            const filledQty   = parseFloat(o.filled_quantity || o.quantity || optLeg?.quantity || 0);
+            const filledPrice = parseFloat(o.avg_filled_price || o.filled_price || o.price || 0);
+            const action = (o.side || o.action || '').toUpperCase();
+            trades.push({
+                id: o.order_id || combo.combo_order_id || String(Date.now()),
+                symbol: o.symbol || '',
+                action,
+                comboType: combo.combo_type || 'NORMAL',
+                status: 'FILLED',
+                qty: filledQty,
+                price: filledPrice,
+                total: parseFloat((filledQty * filledPrice).toFixed(2)),
+                date: o.filled_time || o.update_time || o.create_time || null,
+                optionType: optLeg?.option_type || null,
+                strike: optLeg?.option_exercise_price ? parseFloat(optLeg.option_exercise_price) : null,
+                expiry: optLeg?.option_expire_date || null,
+                source: 'webull'
+            });
+        }
+    }
+    return trades.sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 // GET /api/positions
@@ -100,10 +108,9 @@ router.get('/', async (req, res) => {
 
         // Build history: prefer live Webull orders, fall back to local file
         let history = localData.history || [];
-        if (tradeResult.orders && tradeResult.orders.length > 0) {
-            history = tradeResult.orders
-                .map(normalizeWebullOrder)
-                .sort((a, b) => new Date(b.date) - new Date(a.date));
+        if (tradeResult.combos && tradeResult.combos.length > 0) {
+            const live = flattenWebullCombos(tradeResult.combos);
+            if (live.length > 0) history = live;
         }
 
         // Enrich open positions with current quotes
@@ -140,9 +147,7 @@ router.get('/history', async (req, res) => {
     try {
         const pageSize = parseInt(req.query.limit) || 100;
         const result = await webull.getTradeHistory({ pageSize });
-        const history = (result.orders || [])
-            .map(normalizeWebullOrder)
-            .sort((a, b) => new Date(b.date) - new Date(a.date));
+        const history = flattenWebullCombos(result.combos || []);
         res.json({ ok: true, data: { history, source: result.source, error: result.error } });
     } catch (err) {
         res.status(500).json({ ok: false, error: err.message });

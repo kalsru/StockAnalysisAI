@@ -331,31 +331,19 @@ class WebullService {
     }
 
     async getTradeHistory({ pageSize = 100 } = {}) {
-        // Try every plausible Webull OpenAPI order-history endpoint until one works
-        const candidates = [
-            ['/openapi/trade/order',              { account_id: this.accountId, page_size: pageSize, status: 'Filled' }],
-            ['/openapi/trade/order/filled',       { account_id: this.accountId, page_size: pageSize }],
-            ['/openapi/order/list',               { account_id: this.accountId, page_size: pageSize }],
-            ['/openapi/trade/activity',           { account_id: this.accountId, page_size: pageSize }],
-            ['/openapi/account/order/list',       { account_id: this.accountId, page_size: pageSize }],
-            ['/openapi/v1/trade/order/list',      { account_id: this.accountId, page_size: pageSize }],
-            ['/openapi/assets/order/list',        { account_id: this.accountId, page_size: pageSize }],
-        ];
-        for (const [path, params] of candidates) {
-            try {
-                const data = await this._get(path, params);
-                const orders = Array.isArray(data) ? data
-                    : (data?.orders || data?.items || data?.list || data?.data || []);
-                if (orders.length > 0 || Array.isArray(data)) {
-                    console.log(`[Webull] Trade history found at ${path} — ${orders.length} orders`);
-                    return { orders, source: 'webull', endpoint: path };
-                }
-            } catch (e) {
-                const status = e.response?.data?.error_msg || e.message;
-                console.log(`[Webull] ${path} → ${status}`);
-            }
+        try {
+            const data = await this._get('/openapi/trade/order/history', {
+                account_id: this.accountId,
+                page_size: pageSize
+            });
+            // Response: array of combo orders, each with an `orders[]` array of sub-orders
+            const combos = Array.isArray(data) ? data : [];
+            console.log(`[Webull] Trade history: ${combos.length} combo orders`);
+            return { combos, source: 'webull' };
+        } catch (e) {
+            console.error('[Webull] Trade history failed:', e.response?.data || e.message);
+            return { combos: [], source: 'error', error: e.message };
         }
-        return { orders: [], source: 'not_found', error: 'No working trade history endpoint found' };
     }
 
     // Probe /openapi/trade/order/history with different param combos (returned 417 = route exists)
