@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const webull = require('../services/webullService');
+const db     = require('../services/dbService');
 
 // Normalize a Webull API position into frontend format
 function normalizeWebullPosition(p) {
@@ -125,11 +126,25 @@ router.get('/', async (req, res) => {
             positions = localData.positions || [];
         }
 
-        // Build history: prefer live Webull orders, fall back to local file
+        // Build history: sync live Webull trades to DB, then load full DB history
         let history = localData.history || [];
-        if (tradeResult.combos && tradeResult.combos.length > 0) {
-            const live = flattenWebullCombos(tradeResult.combos);
-            if (live.length > 0) history = live;
+        try {
+            if (tradeResult.combos && tradeResult.combos.length > 0) {
+                const live = flattenWebullCombos(tradeResult.combos);
+                if (live.length > 0) {
+                    await db.upsertTrades(live);
+                }
+            }
+            // DB is the source of truth — contains all trades ever seen
+            const dbTrades = await db.getAllTrades();
+            if (dbTrades.length > 0) history = dbTrades;
+        } catch (e) {
+            console.error('[Positions] DB sync error:', e.message);
+            // Fall back to live only if DB fails
+            if (tradeResult.combos && tradeResult.combos.length > 0) {
+                const live = flattenWebullCombos(tradeResult.combos);
+                if (live.length > 0) history = live;
+            }
         }
 
         // Enrich open positions with current quotes
@@ -161,13 +176,19 @@ router.get('/', async (req, res) => {
     }
 });
 
-// GET /api/positions/history — standalone trade history endpoint
+// GET /api/positions/history — standalone trade history endpoint (DB + live sync)
 router.get('/history', async (req, res) => {
     try {
         const pageSize = parseInt(req.query.limit) || 500;
         const result = await webull.getTradeHistory({ pageSize });
-        const history = flattenWebullCombos(result.combos || []);
-        res.json({ ok: true, data: { history, source: result.source, error: result.error } });
+        // Sync latest from Webull into DB
+        if (result.combos && result.combos.length > 0) {
+            const live = flattenWebullCombos(result.combos);
+            await db.upsertTrades(live).catch(e => console.error('[History] DB sync:', e.message));
+        }
+        // Return full DB history
+        const history = await db.getAllTrades().catch(() => flattenWebullCombos(result.combos || []));
+        res.json({ ok: true, data: { history, source: history.length ? 'db' : result.source, error: result.error } });
     } catch (err) {
         res.status(500).json({ ok: false, error: err.message });
     }
@@ -240,6 +261,17 @@ router.delete('/:id', async (req, res) => {
         data.positions.splice(idx, 1);
         await webull.saveLocalPositions(data);
         res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+// POST /api/positions/trades — manually insert/upsert trade records into DB
+router.post('/trades', async (req, res) => {
+    try {
+        const trades = Array.isArray(req.body) ? req.body : [req.body];
+        const saved = await db.upsertTrades(trades);
+        res.json({ ok: true, saved });
     } catch (err) {
         res.status(500).json({ ok: false, error: err.message });
     }

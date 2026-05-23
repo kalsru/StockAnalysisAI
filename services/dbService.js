@@ -27,6 +27,31 @@ async function ensureSchema(pool) {
             recorded_at     DATETIME2 DEFAULT GETUTCDATE()
         )
     `);
+
+    await pool.request().query(`
+        IF NOT EXISTS (
+            SELECT 1 FROM sysobjects WHERE name='trades' AND xtype='U'
+        )
+        CREATE TABLE trades (
+            id               INT IDENTITY(1,1) PRIMARY KEY,
+            order_id         NVARCHAR(64)   NOT NULL UNIQUE,
+            symbol           NVARCHAR(16)   NOT NULL,
+            instrument_type  NVARCHAR(16)   NULL,
+            strategy         NVARCHAR(32)   NULL,
+            action           NVARCHAR(8)    NULL,
+            intent           NVARCHAR(32)   NULL,
+            qty              DECIMAL(18,4)  NULL,
+            price            DECIMAL(18,4)  NULL,
+            total            DECIMAL(18,2)  NULL,
+            cash_flow        DECIMAL(18,2)  NULL,
+            trade_date       DATE           NULL,
+            trade_datetime   DATETIME2      NULL,
+            filled_ms        BIGINT         NULL,
+            legs             NVARCHAR(MAX)  NULL,
+            source           NVARCHAR(16)   NULL,
+            recorded_at      DATETIME2      DEFAULT GETUTCDATE()
+        )
+    `);
 }
 
 async function upsertSnapshot(data) {
@@ -76,4 +101,93 @@ async function getPnlHistory(days = 90) {
     return result.recordset.reverse();
 }
 
-module.exports = { upsertSnapshot, getPnlHistory };
+// Upsert a batch of flattened trade records (idempotent by order_id)
+async function upsertTrades(trades) {
+    if (!trades || !trades.length) return 0;
+    const pool = await getPool();
+    let saved = 0;
+    for (const t of trades) {
+        try {
+            await pool.request()
+                .input('order_id',        sql.NVarChar(64),    t.id || '')
+                .input('symbol',          sql.NVarChar(16),    t.symbol || '')
+                .input('instrument_type', sql.NVarChar(16),    t.instrumentType || null)
+                .input('strategy',        sql.NVarChar(32),    t.strategy || null)
+                .input('action',          sql.NVarChar(8),     t.action || null)
+                .input('intent',          sql.NVarChar(32),    t.intent || null)
+                .input('qty',             sql.Decimal(18,4),   t.qty || null)
+                .input('price',           sql.Decimal(18,4),   t.price || null)
+                .input('total',           sql.Decimal(18,2),   t.total || null)
+                .input('cash_flow',       sql.Decimal(18,2),   t.cashFlow || null)
+                .input('trade_date',      sql.Date,            t.date ? new Date(t.date) : null)
+                .input('trade_datetime',  sql.DateTime2,       t.datetime ? new Date(t.datetime) : null)
+                .input('filled_ms',       sql.BigInt,          t.filledMs || null)
+                .input('legs',            sql.NVarChar(sql.MAX), t.legs ? JSON.stringify(t.legs) : null)
+                .input('source',          sql.NVarChar(16),    t.source || 'webull')
+                .query(`
+                    MERGE trades AS target
+                    USING (SELECT @order_id AS order_id) AS source
+                    ON target.order_id = source.order_id
+                    WHEN MATCHED THEN
+                        UPDATE SET
+                            symbol          = @symbol,
+                            instrument_type = @instrument_type,
+                            strategy        = @strategy,
+                            action          = @action,
+                            intent          = @intent,
+                            qty             = @qty,
+                            price           = @price,
+                            total           = @total,
+                            cash_flow       = @cash_flow,
+                            trade_date      = @trade_date,
+                            trade_datetime  = @trade_datetime,
+                            filled_ms       = @filled_ms,
+                            legs            = @legs,
+                            source          = @source
+                    WHEN NOT MATCHED THEN
+                        INSERT (order_id, symbol, instrument_type, strategy, action, intent,
+                                qty, price, total, cash_flow, trade_date, trade_datetime,
+                                filled_ms, legs, source)
+                        VALUES (@order_id, @symbol, @instrument_type, @strategy, @action, @intent,
+                                @qty, @price, @total, @cash_flow, @trade_date, @trade_datetime,
+                                @filled_ms, @legs, @source);
+                `);
+            saved++;
+        } catch (e) {
+            console.error('[DB] upsertTrade failed for', t.id, e.message);
+        }
+    }
+    return saved;
+}
+
+// Return all trades from DB ordered oldest-first
+async function getAllTrades() {
+    const pool = await getPool();
+    const result = await pool.request().query(`
+        SELECT
+            order_id       AS id,
+            symbol,
+            instrument_type AS instrumentType,
+            strategy,
+            action,
+            intent,
+            CAST(qty   AS FLOAT) AS qty,
+            CAST(price AS FLOAT) AS price,
+            CAST(total AS FLOAT) AS total,
+            CAST(cash_flow AS FLOAT) AS cashFlow,
+            CONVERT(VARCHAR(10), trade_date, 23) AS date,
+            trade_datetime AS datetime,
+            filled_ms      AS filledMs,
+            legs,
+            source
+        FROM trades
+        ORDER BY filled_ms ASC
+    `);
+    return result.recordset.map(r => ({
+        ...r,
+        legs: r.legs ? JSON.parse(r.legs) : [],
+        filledMs: Number(r.filledMs)
+    }));
+}
+
+module.exports = { upsertSnapshot, getPnlHistory, upsertTrades, getAllTrades };
