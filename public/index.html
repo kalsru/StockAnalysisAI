@@ -1425,21 +1425,37 @@ function renderHistoryPositions(history) {
         $('positions-history-wrap').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">No trade history found. Filled orders from your Webull account will appear here.</div>';
         return;
     }
-    // Supports both Webull live orders (action/qty/price/total/date) and legacy local format (pnl/closeDate)
-    const rows = history.map(h => {
+    // Compute running P&L oldest→newest, then display newest first
+    const chronological = [...history].reverse();
+    let running = 0;
+    const withPnl = chronological.map(h => {
         const isLive = h.source === 'webull' && h.action;
-        const date = (h.date || h.closeDate || h.openDate || '').split('T')[0] || '--';
+        // SELL = money received (+), BUY = money paid (-)
+        const signed = isLive ? (h.action === 'SELL' ? h.total : -h.total) : (h.pnl || 0);
+        running += signed;
+        return { ...h, tradePnl: signed, runningTotal: running };
+    });
+
+    const rows = [...withPnl].reverse().map(h => {
+        const isLive = h.source === 'webull' && h.action;
+        const date = h.date || h.closeDate || h.openDate || '--';
         const optionDetail = h.strike ? ` · ${h.optionType||''} $${h.strike}${h.expiry ? ' exp '+h.expiry : ''}` : '';
+        const pnlClr = h.tradePnl >= 0 ? 'var(--green)' : 'var(--red)';
+        const runClr = h.runningTotal >= 0 ? 'var(--green)' : 'var(--red)';
+        const pnlStr = `${h.tradePnl >= 0 ? '+' : ''}$${fmt(Math.abs(h.tradePnl))}`;
+        const runStr = `${h.runningTotal >= 0 ? '+' : '-'}$${fmt(Math.abs(h.runningTotal))}`;
+
         if (isLive) {
             const aBg = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
             const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
             return `<tr>
                 <td class="text-left"><strong>${h.symbol}</strong></td>
                 <td><span class="badge" style="background:${aBg};color:${aClr}">${h.action}</span></td>
-                <td class="text-left" style="color:var(--text2);font-size:0.75rem">${(h.type||'').replace(/_/g,' ')}${optionDetail}</td>
+                <td class="text-left" style="color:var(--text2);font-size:0.75rem">${optionDetail||'—'}</td>
                 <td style="color:var(--text2)">${h.qty}</td>
                 <td style="font-weight:600">$${fmt(h.price)}</td>
-                <td style="font-weight:700">$${fmt(h.total)}</td>
+                <td style="color:${pnlClr};font-weight:700">${pnlStr}</td>
+                <td style="color:${runClr};font-weight:700">${runStr}</td>
                 <td style="color:var(--text3)">${date}</td>
             </tr>`;
         }
@@ -1448,13 +1464,14 @@ function renderHistoryPositions(history) {
             <td><span class="badge badge-purple">CLOSED</span></td>
             <td class="text-left" style="color:var(--text2);font-size:0.75rem">${(h.type||'').replace(/_/g,' ')}</td>
             <td style="color:var(--text2)">—</td><td>—</td>
-            <td style="color:${pnlColor(h.pnl)};font-weight:700">${(h.pnl||0)>=0?'+':''}$${fmt(h.pnl||0)}</td>
+            <td style="color:${pnlClr};font-weight:700">${pnlStr}</td>
+            <td style="color:${runClr};font-weight:700">${runStr}</td>
             <td style="color:var(--text3)">${date}</td>
         </tr>`;
     }).join('');
     $('positions-history-wrap').innerHTML = `
         <table>
-            <thead><tr><th class="text-left">Symbol</th><th>Action</th><th class="text-left">Type / Detail</th><th>Qty</th><th>Price</th><th>Total</th><th>Date</th></tr></thead>
+            <thead><tr><th class="text-left">Symbol</th><th>Action</th><th class="text-left">Detail</th><th>Qty</th><th>Price</th><th>Trade P&L</th><th>Running Total</th><th>Date</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
 }

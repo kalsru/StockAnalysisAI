@@ -75,7 +75,12 @@ function flattenWebullCombos(combos) {
                 qty: filledQty,
                 price: filledPrice,
                 total: parseFloat((filledQty * filledPrice).toFixed(2)),
-                date: o.filled_time || o.update_time || o.create_time || null,
+                date: (() => {
+                    const raw = o.filled_time || o.update_time || o.create_time;
+                    if (!raw) return null;
+                    const ms = typeof raw === 'number' ? raw : parseInt(raw);
+                    return isNaN(ms) ? raw : new Date(ms).toISOString().split('T')[0];
+                })(),
                 optionType: optLeg?.option_type || null,
                 strike: optLeg?.option_exercise_price ? parseFloat(optLeg.option_exercise_price) : null,
                 expiry: optLeg?.option_expire_date || null,
