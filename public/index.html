@@ -1426,121 +1426,43 @@ function renderHistoryPositions(history) {
         return;
     }
 
-    // Chronological for P&L tracking
+    // Chronological — oldest first for running cash flow
     const chrono = [...history].sort((a, b) => (a.filledMs || 0) - (b.filledMs || 0));
 
-    // Position trackers (use legs to track positions accurately)
-    const stockLots = {};   // symbol → [{shares, price, date}]
-    const optLots   = {};   // key (symbol|type|strike|expiry|side) → [{qty, price, date}]
-    let runningPnl  = 0;
-    let totalCashFlow = 0;
+    // Compute running cash flow (this is mathematically certain)
+    let runningCash = 0;
+    let totalIn = 0, totalOut = 0;
+    let stockBuyTotal = 0, stockSellTotal = 0;
+    let optPremiumIn = 0, optPremiumOut = 0;
 
     const processed = chrono.map(t => {
-        let tradePnl = 0, openDate = null, hasMatch = false;
-        totalCashFlow += t.cashFlow;
+        runningCash += t.cashFlow;
+        if (t.cashFlow >= 0) totalIn += t.cashFlow; else totalOut += Math.abs(t.cashFlow);
 
-        // Only do per-leg P&L tracking for STOCK and SINGLE-leg option trades.
-        // Multi-leg combos (VERTICAL, CALENDAR, COVERED_STOCK) have a NET combo price
-        // that can't be cleanly split per leg.
-        const isMultiLeg = ['VERTICAL', 'CALENDAR', 'COVERED_STOCK'].includes(t.strategy);
-        if (isMultiLeg) {
-            return { ...t, tradePnl: null, openDate: null, runningPnl };
+        // Categorize cash by stock vs options for the summary
+        if (t.strategy === 'STOCK') {
+            if (t.action === 'BUY')  stockBuyTotal  += Math.abs(t.cashFlow);
+            else                     stockSellTotal += t.cashFlow;
+        } else if (t.strategy === 'COVERED_STOCK') {
+            // Mostly stock value — count it on the stock side
+            if (t.action === 'BUY')  stockBuyTotal  += Math.abs(t.cashFlow);
+            else                     stockSellTotal += t.cashFlow;
+        } else {
+            // SINGLE / VERTICAL / CALENDAR — pure option premium
+            if (t.cashFlow >= 0) optPremiumIn  += t.cashFlow;
+            else                 optPremiumOut += Math.abs(t.cashFlow);
         }
 
-        // Process each leg
-        for (const leg of (t.legs || [])) {
-            if (leg.instrumentType === 'EQUITY') {
-                if (!stockLots[t.symbol]) stockLots[t.symbol] = [];
-                if (leg.side === 'BUY') {
-                    stockLots[t.symbol].push({ shares: leg.qty, price: t.price, date: t.date });
-                } else if (leg.side === 'SELL') {
-                    let rem = leg.qty, costBasis = 0, costShares = 0;
-                    while (rem > 0 && stockLots[t.symbol].length) {
-                        const lot = stockLots[t.symbol][0];
-                        const take = Math.min(rem, lot.shares);
-                        costBasis += take * lot.price;
-                        costShares += take;
-                        rem -= take;
-                        lot.shares -= take;
-                        if (!openDate) openDate = lot.date;
-                        if (lot.shares <= 0) stockLots[t.symbol].shift();
-                    }
-                    if (costShares > 0) {
-                        tradePnl += (t.price - costBasis / costShares) * costShares;
-                        hasMatch = true;
-                    }
-                }
-            } else if (leg.instrumentType === 'OPTION') {
-                // Key includes the SIDE we're tracking (short calls vs long calls)
-                // SELL_TO_OPEN → short, BUY_TO_CLOSE → close short
-                // BUY_TO_OPEN  → long,  SELL_TO_CLOSE → close long
-                const isOpen  = (leg.side === 'SELL' && t.intent !== 'SELL_TO_CLOSE') || (leg.side === 'BUY' && t.intent === 'BUY_TO_OPEN');
-                const isClose = !isOpen;
-                // For multi-leg combos, derive intent per leg from option_strategy semantics:
-                // COVERED_STOCK close: equity SELL + option BUY = closing short calls
-                // VERTICAL credit: option SELL + option BUY = opening short spread
-                // CALENDAR: option SELL (back) + option BUY (front) = roll
-                // Simpler: track by side. SELL=opens short, BUY=closes short OR opens long
-                const trackKey = `${t.symbol}|${leg.optionType}|${leg.strike}|${leg.expiry}`;
-                if (!optLots[trackKey]) optLots[trackKey] = { short: [], long: [] };
-
-                // For options leg, the price per leg is the combo's filled_price for SINGLE,
-                // but for multi-leg (VERTICAL/CALENDAR/COVERED_STOCK) we can't split — use combo price.
-                const legPrice = t.price;
-
-                if (leg.side === 'SELL') {
-                    // Either opening short OR closing long
-                    if (optLots[trackKey].long.length) {
-                        // Close long lot first
-                        let rem = leg.qty, costBasis = 0, q = 0;
-                        while (rem > 0 && optLots[trackKey].long.length) {
-                            const lot = optLots[trackKey].long[0];
-                            const take = Math.min(rem, lot.qty);
-                            costBasis += take * lot.price;
-                            q += take;
-                            rem -= take;
-                            lot.qty -= take;
-                            if (!openDate) openDate = lot.date;
-                            if (lot.qty <= 0) optLots[trackKey].long.shift();
-                        }
-                        if (q > 0) {
-                            tradePnl += (legPrice - costBasis / q) * q * 100;
-                            hasMatch = true;
-                        }
-                        if (rem > 0) optLots[trackKey].short.push({ qty: rem, price: legPrice, date: t.date });
-                    } else {
-                        optLots[trackKey].short.push({ qty: leg.qty, price: legPrice, date: t.date });
-                    }
-                } else if (leg.side === 'BUY') {
-                    // Either closing short OR opening long
-                    if (optLots[trackKey].short.length) {
-                        let rem = leg.qty, premIn = 0, q = 0;
-                        while (rem > 0 && optLots[trackKey].short.length) {
-                            const lot = optLots[trackKey].short[0];
-                            const take = Math.min(rem, lot.qty);
-                            premIn += take * lot.price;
-                            q += take;
-                            rem -= take;
-                            lot.qty -= take;
-                            if (!openDate) openDate = lot.date;
-                            if (lot.qty <= 0) optLots[trackKey].short.shift();
-                        }
-                        if (q > 0) {
-                            tradePnl += (premIn / q - legPrice) * q * 100;
-                            hasMatch = true;
-                        }
-                        if (rem > 0) optLots[trackKey].long.push({ qty: rem, price: legPrice, date: t.date });
-                    } else {
-                        optLots[trackKey].long.push({ qty: leg.qty, price: legPrice, date: t.date });
-                    }
-                }
-            }
-        }
-
-        if (hasMatch) runningPnl += tradePnl;
-
-        return { ...t, tradePnl: hasMatch ? parseFloat(tradePnl.toFixed(2)) : null, openDate, runningPnl };
+        return { ...t, runningCash };
     });
+
+    // Opening + current equity from positions API
+    let openPositionValue = 0;
+    let unrealizedPnl = 0;
+    if (_chatPositions.length) {
+        openPositionValue = _chatPositions.reduce((s, p) => s + (p.marketValue || 0), 0);
+        unrealizedPnl     = _chatPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+    }
 
     // Build rows (newest first)
     const rows = [...processed].reverse().map(h => {
@@ -1559,10 +1481,7 @@ function renderHistoryPositions(history) {
             STOCK:         'rgba(16,185,129,0.15)'
         })[h.strategy] || 'rgba(100,100,100,0.15)';
 
-        const aBg  = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
-        const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
-
-        // Build leg detail — show share equivalents for option legs (contract × 100 = shares)
+        // Build leg detail — show contracts AND share equivalents
         const legDetail = (h.legs || []).map(l => {
             const sideClr = l.side === 'BUY' ? 'var(--green)' : 'var(--red)';
             if (l.instrumentType === 'EQUITY') {
@@ -1577,67 +1496,67 @@ function renderHistoryPositions(history) {
         const intentLabel = h.intent ? h.intent.replace(/_/g,' ') : '';
         const intentColor = (h.intent||'').includes('OPEN') ? 'var(--accent2)' : (h.intent||'').includes('CLOSE') ? '#f59e0b' : 'var(--text3)';
 
-        const pnlCell = h.tradePnl !== null
-            ? `<span style="color:${h.tradePnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.tradePnl>=0?'+':''}$${fmt(Math.abs(h.tradePnl))}</span>`
-            : '<span style="color:var(--text3)">—</span>';
-        const runCell = `<span style="color:${h.runningPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.runningPnl>=0?'+':''}$${fmt(Math.abs(h.runningPnl))}</span>`;
-        const cashCell = `<span style="color:${h.cashFlow>=0?'var(--green)':'var(--red)'}">${h.cashFlow>=0?'+':'-'}$${fmt(Math.abs(h.cashFlow))}</span>`;
+        const cashCell = `<span style="color:${h.cashFlow>=0?'var(--green)':'var(--red)'};font-weight:600">${h.cashFlow>=0?'+':'-'}$${fmt(Math.abs(h.cashFlow))}</span>`;
+        const runCell  = `<span style="color:${h.runningCash>=0?'var(--green)':'var(--red)'};font-weight:700">${h.runningCash>=0?'+':'-'}$${fmt(Math.abs(h.runningCash))}</span>`;
 
         return `<tr>
             <td><span style="background:${stratBg};color:${stratColor};font-size:0.68rem;padding:2px 6px;border-radius:4px;white-space:nowrap">${h.strategy}</span></td>
             <td class="text-left">${legDetail}</td>
             <td style="font-weight:600">$${fmt(h.price)}</td>
             <td>${cashCell}</td>
-            <td style="font-size:0.7rem;color:${intentColor}">${intentLabel}</td>
-            <td>${pnlCell}</td>
             <td>${runCell}</td>
-            <td style="color:var(--text3);font-size:0.7rem">${h.openDate||'—'}</td>
+            <td style="font-size:0.7rem;color:${intentColor}">${intentLabel}</td>
             <td style="color:var(--text3);font-size:0.7rem">${h.date}</td>
         </tr>`;
     }).join('');
 
-    // Summary stats — cash deployed in stock currently held
-    const finalRunning = processed[processed.length - 1]?.runningPnl || 0;
-    let openStockValue = 0;
-    for (const sym in stockLots) {
-        for (const lot of stockLots[sym]) openStockValue += lot.shares * lot.price;
-    }
+    // Account equity = open position market value + net cash flow over period
+    // (Approximates running equity assuming we started at zero before history)
+    const accountEquityChange = runningCash + unrealizedPnl;
 
     $('positions-history-wrap').innerHTML = `
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
-            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Cost Basis (Open)</div>
-                <div style="font-weight:700">$${fmt(openStockValue)}</div></div>
-            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Cash Flow</div>
-                <div style="font-weight:700;color:${totalCashFlow>=0?'var(--green)':'var(--red)'}">${totalCashFlow>=0?'+':'-'}$${fmt(Math.abs(totalCashFlow))}</div></div>
-            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Realized P&L</div>
-                <div style="font-weight:700;color:${finalRunning>=0?'var(--green)':'var(--red)'}">${finalRunning>=0?'+':'-'}$${fmt(Math.abs(finalRunning))}</div></div>
-            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Unrealized P&L</div>
-                <div style="font-weight:700;color:var(--green)" id="hist-unrealized">Loading…</div></div>
+        <div style="display:grid;grid-template-columns:repeat(2,1fr) repeat(3,1fr);gap:10px;margin-bottom:16px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
+            <div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Stock Bought</div>
+                <div style="font-weight:700;color:var(--red)">-$${fmt(stockBuyTotal)}</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Stock Sold (Rolls)</div>
+                <div style="font-weight:700;color:var(--green)">+$${fmt(stockSellTotal)}</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Option Premium Net</div>
+                <div style="font-weight:700;color:${optPremiumIn-optPremiumOut>=0?'var(--green)':'var(--red)'}">${optPremiumIn-optPremiumOut>=0?'+':'-'}$${fmt(Math.abs(optPremiumIn-optPremiumOut))}</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Cash Flow</div>
+                <div style="font-weight:700;color:${runningCash>=0?'var(--green)':'var(--red)'}">${runningCash>=0?'+':'-'}$${fmt(Math.abs(runningCash))}</div>
+            </div>
+            <div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Current Open Equity</div>
+                <div style="font-weight:700;color:var(--accent2)">$${fmt(openPositionValue)}</div>
+                <div style="font-size:0.65rem;color:${unrealizedPnl>=0?'var(--green)':'var(--red)'};margin-top:2px">Unrealized: ${unrealizedPnl>=0?'+':'-'}$${fmt(Math.abs(unrealizedPnl))}</div>
+            </div>
         </div>
         <table>
             <thead><tr>
                 <th>Strategy</th>
                 <th class="text-left">Legs</th>
-                <th>Net Price</th>
+                <th>Net Price /sh</th>
                 <th>Cash Flow</th>
+                <th>Running Cash</th>
                 <th>Intent</th>
-                <th>Trade P&L</th>
-                <th>Running P&L</th>
-                <th>Opened</th>
                 <th>Date</th>
             </tr></thead>
             <tbody>${rows}</tbody>
-        </table>`;
-
-    // Fill unrealized P&L from open positions
-    if (_chatPositions.length) {
-        const unreal = _chatPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
-        const el = document.getElementById('hist-unrealized');
-        if (el) {
-            el.textContent = `${unreal>=0?'+':'-'}$${fmt(Math.abs(unreal))}`;
-            el.style.color = unreal >= 0 ? 'var(--green)' : 'var(--red)';
-        }
-    }
+        </table>
+        <div style="margin-top:12px;padding:10px;background:rgba(59,130,246,0.08);border-left:3px solid var(--accent2);border-radius:4px;font-size:0.75rem;color:var(--text2);line-height:1.5">
+            <strong style="color:var(--accent2)">How to read this:</strong><br>
+            • <strong>Cash Flow</strong> = actual money in/out per trade (definitive)<br>
+            • <strong>Running Cash</strong> = cumulative cash flow over the period<br>
+            • <strong>Net Cash Flow ${runningCash<0?'(red)':'(green)'}</strong> = net cash deployed (negative = capital invested still working)<br>
+            • Multi-leg combos (COVERED_STOCK, VERTICAL, CALENDAR) report the <em>net combo price</em> — individual leg P&L can't be split from the API
+        </div>`;
 }
 
 async function closePosition(id, symbol, estimatedPnl) {
