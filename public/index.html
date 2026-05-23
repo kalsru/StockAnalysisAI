@@ -1466,7 +1466,7 @@ async function renderHistoryPositions(history) {
 
     // Fetch live balance + snapshot history for true starting balance
     let netLiquidation = null, marginUsed = 0, cashBalance = 0;
-    let startingEquity = null, startingDate = null;
+    let startingEquity = null, startingDate = null, startingSource = 'snapshot';
     try {
         const [summaryRes, histRes] = await Promise.all([
             fetch('/api/analytics/summary'),
@@ -1483,8 +1483,20 @@ async function renderHistoryPositions(history) {
             const earliest = histData.data[0];
             startingEquity = earliest.netLiquidation;
             startingDate   = (earliest.date || '').split('T')[0];
+            startingSource = 'snapshot';
         }
     } catch { /* keep defaults */ }
+
+    // Manual override: localStorage wins over snapshot
+    try {
+        const saved = JSON.parse(localStorage.getItem('wb_starting_equity') || 'null');
+        if (saved && saved.amount) {
+            startingEquity = saved.amount;
+            startingDate   = saved.date || startingDate;
+            startingSource = 'manual';
+        }
+    } catch { /* ignore */ }
+
     const netEquity = netLiquidation !== null ? netLiquidation : (openPositionValue - marginUsed);
     const periodPnl = (startingEquity !== null && netEquity !== null) ? (netEquity - startingEquity) : null;
     const periodPnlPct = (startingEquity && periodPnl !== null) ? (periodPnl / startingEquity * 100) : null;
@@ -1541,9 +1553,13 @@ async function renderHistoryPositions(history) {
         <!-- Account Equity: Starting → Current → P&L -->
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px;padding:14px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
             <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Starting Equity${startingDate?' ('+startingDate+')':''}</div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:3px;display:flex;align-items:center;gap:6px">
+                    Starting Equity${startingDate?' ('+startingDate+')':''}
+                    <button onclick="editStartingEquity()" title="Set manually" style="background:none;border:none;cursor:pointer;color:var(--accent2);padding:0;font-size:0.75rem;line-height:1">✏️</button>
+                    ${startingSource==='manual'?'<span style="font-size:0.6rem;color:var(--yellow);background:rgba(245,158,11,0.15);padding:1px 5px;border-radius:3px">manual</span>':''}
+                </div>
                 <div style="font-weight:700;font-size:1.15rem;color:var(--text)">${startingEquity!==null?'$'+fmt(startingEquity):'—'}</div>
-                <div style="font-size:0.65rem;color:var(--text3);margin-top:3px">${startingEquity===null?'No snapshot recorded yet':'first daily snapshot'}</div>
+                <div style="font-size:0.65rem;color:var(--text3);margin-top:3px">${startingEquity===null?'No snapshot — click ✏️ to set':'click ✏️ to override'}</div>
             </div>
             <div style="border-left:2px solid var(--border);padding-left:14px">
                 <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Current Equity</div>
@@ -1572,6 +1588,46 @@ async function renderHistoryPositions(history) {
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
+}
+
+function editStartingEquity() {
+    // Show a small modal overlay to let the user set starting equity manually
+    const existing = (() => { try { return JSON.parse(localStorage.getItem('wb_starting_equity') || 'null'); } catch { return null; } })();
+    const modal = document.createElement('div');
+    modal.id = 'starting-eq-modal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center';
+    modal.innerHTML = `
+        <div style="background:var(--panel);border:1px solid var(--border2);border-radius:10px;padding:24px;width:320px;box-shadow:var(--shadow)">
+            <div style="font-weight:700;font-size:1rem;margin-bottom:4px">Set Starting Equity</div>
+            <div style="font-size:0.78rem;color:var(--text3);margin-bottom:16px">Webull doesn't expose deposit history. Enter your starting balance manually — saved in browser.</div>
+            <label style="font-size:0.78rem;color:var(--text2);display:block;margin-bottom:4px">Amount ($)</label>
+            <input id="se-amount" type="number" value="${existing?.amount||''}" placeholder="e.g. 200000" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border2);background:var(--bg2);color:var(--text);font-size:0.9rem;margin-bottom:12px">
+            <label style="font-size:0.78rem;color:var(--text2);display:block;margin-bottom:4px">Date (when account was funded)</label>
+            <input id="se-date" type="date" value="${existing?.date||''}" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border2);background:var(--bg2);color:var(--text);font-size:0.9rem;margin-bottom:16px">
+            <div style="display:flex;gap:8px">
+                <button onclick="saveStartingEquity()" style="flex:1;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600">Save</button>
+                ${existing?`<button onclick="clearStartingEquity()" style="padding:8px 12px;background:rgba(239,68,68,0.15);color:var(--red);border:none;border-radius:6px;cursor:pointer">Clear</button>`:''}
+                <button onclick="document.getElementById('starting-eq-modal').remove()" style="padding:8px 12px;background:var(--panel2);color:var(--text2);border:none;border-radius:6px;cursor:pointer">Cancel</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    document.getElementById('se-amount').focus();
+}
+
+function saveStartingEquity() {
+    const amount = parseFloat(document.getElementById('se-amount').value);
+    const date   = document.getElementById('se-date').value;
+    if (!amount || isNaN(amount)) { alert('Enter a valid amount'); return; }
+    localStorage.setItem('wb_starting_equity', JSON.stringify({ amount, date: date || null }));
+    document.getElementById('starting-eq-modal').remove();
+    // Re-render history with new starting equity
+    if (_closedHistory.length) renderHistoryPositions(_closedHistory);
+}
+
+function clearStartingEquity() {
+    localStorage.removeItem('wb_starting_equity');
+    document.getElementById('starting-eq-modal').remove();
+    if (_closedHistory.length) renderHistoryPositions(_closedHistory);
 }
 
 async function closePosition(id, symbol, estimatedPnl) {
