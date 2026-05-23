@@ -330,20 +330,35 @@ class WebullService {
         }
     }
 
-    async getTradeHistory({ pageSize = 100 } = {}) {
-        try {
-            const data = await this._get('/openapi/trade/order/history', {
-                account_id: this.accountId,
-                page_size: pageSize
-            });
-            // Response: array of combo orders, each with an `orders[]` array of sub-orders
-            const combos = Array.isArray(data) ? data : [];
-            console.log(`[Webull] Trade history: ${combos.length} combo orders`);
-            return { combos, source: 'webull' };
-        } catch (e) {
-            console.error('[Webull] Trade history failed:', e.response?.data || e.message);
-            return { combos: [], source: 'error', error: e.message };
+    async getTradeHistory({ pageSize = 500 } = {}) {
+        // Start from Jan 1 2026 to capture the full account history
+        const startMs = new Date('2026-01-01T00:00:00Z').getTime();
+        const endMs   = Date.now();
+        const allCombos = [];
+
+        // Fetch up to 5 pages to handle pagination
+        for (let page = 1; page <= 5; page++) {
+            try {
+                const data = await this._get('/openapi/trade/order/history', {
+                    account_id:  this.accountId,
+                    page_size:   pageSize,
+                    page_index:  page,
+                    start_time:  startMs,
+                    end_time:    endMs
+                });
+                const combos = Array.isArray(data) ? data : (data?.items || data?.list || []);
+                console.log(`[Webull] Trade history page ${page}: ${combos.length} combo orders`);
+                if (!combos.length) break;
+                allCombos.push(...combos);
+                if (combos.length < pageSize) break; // last page
+            } catch (e) {
+                console.error(`[Webull] Trade history page ${page} failed:`, e.response?.data || e.message);
+                if (page === 1) return { combos: [], source: 'error', error: e.message };
+                break;
+            }
         }
+        console.log(`[Webull] Trade history total: ${allCombos.length} combo orders`);
+        return { combos: allCombos, source: 'webull' };
     }
 
     // Return the full raw trade history data — for inspection

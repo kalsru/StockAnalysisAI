@@ -164,7 +164,7 @@ router.get('/', async (req, res) => {
 // GET /api/positions/history — standalone trade history endpoint
 router.get('/history', async (req, res) => {
     try {
-        const pageSize = parseInt(req.query.limit) || 100;
+        const pageSize = parseInt(req.query.limit) || 500;
         const result = await webull.getTradeHistory({ pageSize });
         const history = flattenWebullCombos(result.combos || []);
         res.json({ ok: true, data: { history, source: result.source, error: result.error } });
