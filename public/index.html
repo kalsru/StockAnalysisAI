@@ -1360,13 +1360,11 @@ async function sendPositionChat() {
             if (pd.data?.positions?.length) _chatPositions = pd.data.positions;
         } catch { /* keep cached positions on error */ }
 
-        // Build compact chain context from currently-loaded chain (ATM ±10)
+        // Build compact chain context — strikes within $10 of current price
         let chainContext = null;
         if (currentChain && currentChain.rows && currentChain.rows.length) {
             const S = currentChain.underlyingPrice;
-            const atmIdx = currentChain.rows.reduce((bi, r, i) =>
-                Math.abs(r.strike - S) < Math.abs(currentChain.rows[bi].strike - S) ? i : bi, 0);
-            const window = currentChain.rows.slice(Math.max(0, atmIdx - 10), atmIdx + 11);
+            const window = currentChain.rows.filter(r => Math.abs(r.strike - S) <= 10);
             chainContext = {
                 symbol: currentChain.symbol || $('chain-ticker').value,
                 underlyingPrice: S,
