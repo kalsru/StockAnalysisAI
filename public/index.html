@@ -1458,9 +1458,12 @@ async function renderHistoryPositions(history) {
             else                 optPremiumOut += Math.abs(t.cashFlow);
         }
 
-        // Only non-stock trades contribute to option P&L running total
-        const tradePnl = isStockMove ? null : t.cashFlow;
-        if (!isStockMove) runningOptPnl += t.cashFlow;
+        // Only pure option strategies count toward P&L running total.
+        // STOCK and COVERED_STOCK both involve stock capital — excluded.
+        const isPureOption = ['SINGLE', 'VERTICAL', 'CALENDAR'].includes(t.strategy)
+                          || (t.instrumentType === 'OPTION' && !['STOCK','COVERED_STOCK'].includes(t.strategy));
+        const tradePnl = isPureOption ? t.cashFlow : null;
+        if (isPureOption) runningOptPnl += t.cashFlow;
 
         return { ...t, runningCash, tradePnl, runningOptPnl };
     });
