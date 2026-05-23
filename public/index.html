@@ -1473,30 +1473,21 @@ async function renderHistoryPositions(history) {
         unrealizedPnl     = _chatPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
     }
 
-    // Fetch live balance + snapshot history for true starting balance
+    // Fetch live balance for current equity
     let netLiquidation = null, marginUsed = 0, cashBalance = 0;
-    let startingEquity = null, startingDate = null, startingSource = 'snapshot';
+    // Hard-coded starting capital — account funded 2026-04-22
+    let startingEquity = 200000, startingDate = '2026-04-22', startingSource = 'hardcoded';
     try {
-        const [summaryRes, histRes] = await Promise.all([
-            fetch('/api/analytics/summary'),
-            fetch('/api/analytics/pnl-history?days=180')
-        ]);
+        const summaryRes  = await fetch('/api/analytics/summary');
         const summaryData = await summaryRes.json();
-        const histData    = await histRes.json();
         if (summaryData.ok && summaryData.data) {
             netLiquidation = summaryData.data.netLiquidation;
             cashBalance    = summaryData.data.cashBalance || 0;
             marginUsed     = cashBalance < 0 ? Math.abs(cashBalance) : (summaryData.data.maintenanceMargin || 0);
         }
-        if (histData.ok && histData.data?.length) {
-            const earliest = histData.data[0];
-            startingEquity = earliest.netLiquidation;
-            startingDate   = (earliest.date || '').split('T')[0];
-            startingSource = 'snapshot';
-        }
     } catch { /* keep defaults */ }
 
-    // Manual override: localStorage wins over snapshot
+    // localStorage override still honoured if set manually via ✏️
     try {
         const saved = JSON.parse(localStorage.getItem('wb_starting_equity') || 'null');
         if (saved && saved.amount) {
