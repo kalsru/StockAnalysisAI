@@ -330,29 +330,57 @@ class WebullService {
         }
     }
 
-    async getTradeHistory({ pageSize = 100, lastOrderId = '' } = {}) {
-        try {
-            const params = { account_id: this.accountId, page_size: pageSize };
-            if (lastOrderId) params.last_order_id = lastOrderId;
-            const data = await this._get('/openapi/trade/order/list', params);
-            const orders = Array.isArray(data) ? data : (data?.orders || data?.items || []);
-            return { orders, source: 'webull' };
-        } catch (e) {
-            console.error('[Webull] Trade history failed:', e.response?.data || e.message);
-            // Try alternate endpoint shape
+    async getTradeHistory({ pageSize = 100 } = {}) {
+        // Try every plausible Webull OpenAPI order-history endpoint until one works
+        const candidates = [
+            ['/openapi/trade/order',              { account_id: this.accountId, page_size: pageSize, status: 'Filled' }],
+            ['/openapi/trade/order/filled',       { account_id: this.accountId, page_size: pageSize }],
+            ['/openapi/order/list',               { account_id: this.accountId, page_size: pageSize }],
+            ['/openapi/trade/activity',           { account_id: this.accountId, page_size: pageSize }],
+            ['/openapi/account/order/list',       { account_id: this.accountId, page_size: pageSize }],
+            ['/openapi/v1/trade/order/list',      { account_id: this.accountId, page_size: pageSize }],
+            ['/openapi/assets/order/list',        { account_id: this.accountId, page_size: pageSize }],
+        ];
+        for (const [path, params] of candidates) {
             try {
-                const data2 = await this._get('/openapi/trade/orders', {
-                    account_id: this.accountId,
-                    status: 'Filled',
-                    page_size: pageSize
-                });
-                const orders = Array.isArray(data2) ? data2 : (data2?.orders || data2?.items || []);
-                return { orders, source: 'webull' };
-            } catch (e2) {
-                console.error('[Webull] Trade history alt failed:', e2.response?.data || e2.message);
-                return { orders: [], source: 'error', error: e.message };
+                const data = await this._get(path, params);
+                const orders = Array.isArray(data) ? data
+                    : (data?.orders || data?.items || data?.list || data?.data || []);
+                if (orders.length > 0 || Array.isArray(data)) {
+                    console.log(`[Webull] Trade history found at ${path} — ${orders.length} orders`);
+                    return { orders, source: 'webull', endpoint: path };
+                }
+            } catch (e) {
+                const status = e.response?.data?.error_msg || e.message;
+                console.log(`[Webull] ${path} → ${status}`);
             }
         }
+        return { orders: [], source: 'not_found', error: 'No working trade history endpoint found' };
+    }
+
+    // Probe all candidate endpoints and return results — for debugging
+    async probeTradeEndpoints() {
+        const candidates = [
+            '/openapi/trade/order',
+            '/openapi/trade/order/filled',
+            '/openapi/order/list',
+            '/openapi/trade/activity',
+            '/openapi/account/order/list',
+            '/openapi/v1/trade/order/list',
+            '/openapi/assets/order/list',
+            '/openapi/trade/history',
+            '/openapi/trade/order/history',
+        ];
+        const results = {};
+        for (const path of candidates) {
+            try {
+                const data = await this._get(path, { account_id: this.accountId, page_size: 5 });
+                results[path] = { ok: true, sample: JSON.stringify(data).slice(0, 200) };
+            } catch (e) {
+                results[path] = { ok: false, error: e.response?.data?.error_msg || e.message };
+            }
+        }
+        return results;
     }
 
     // ─── Local position file (manual trades) ─────────────────────────────────

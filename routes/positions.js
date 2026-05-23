@@ -221,4 +221,14 @@ router.delete('/:id', async (req, res) => {
     }
 });
 
+// GET /api/positions/probe — find the correct Webull trade history endpoint
+router.get('/probe', async (req, res) => {
+    try {
+        const results = await webull.probeTradeEndpoints();
+        res.json({ ok: true, results });
+    } catch (err) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
 module.exports = router;
