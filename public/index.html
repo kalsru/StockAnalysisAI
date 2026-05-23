@@ -1464,19 +1464,30 @@ async function renderHistoryPositions(history) {
         unrealizedPnl     = _chatPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
     }
 
-    // Fetch live balance for margin / net equity calculation
+    // Fetch live balance + snapshot history for true starting balance
     let netLiquidation = null, marginUsed = 0, cashBalance = 0;
+    let startingEquity = null, startingDate = null;
     try {
-        const summaryRes = await fetch('/api/analytics/summary');
+        const [summaryRes, histRes] = await Promise.all([
+            fetch('/api/analytics/summary'),
+            fetch('/api/analytics/pnl-history?days=180')
+        ]);
         const summaryData = await summaryRes.json();
+        const histData    = await histRes.json();
         if (summaryData.ok && summaryData.data) {
             netLiquidation = summaryData.data.netLiquidation;
             cashBalance    = summaryData.data.cashBalance || 0;
-            // Negative cash balance means margin loan
             marginUsed     = cashBalance < 0 ? Math.abs(cashBalance) : (summaryData.data.maintenanceMargin || 0);
+        }
+        if (histData.ok && histData.data?.length) {
+            const earliest = histData.data[0];
+            startingEquity = earliest.netLiquidation;
+            startingDate   = (earliest.date || '').split('T')[0];
         }
     } catch { /* keep defaults */ }
     const netEquity = netLiquidation !== null ? netLiquidation : (openPositionValue - marginUsed);
+    const periodPnl = (startingEquity !== null && netEquity !== null) ? (netEquity - startingEquity) : null;
+    const periodPnlPct = (startingEquity && periodPnl !== null) ? (periodPnl / startingEquity * 100) : null;
 
     // Build rows (newest first)
     const rows = [...processed].reverse().map(h => {
@@ -1510,15 +1521,13 @@ async function renderHistoryPositions(history) {
         const intentLabel = h.intent ? h.intent.replace(/_/g,' ') : '';
         const intentColor = (h.intent||'').includes('OPEN') ? 'var(--accent2)' : (h.intent||'').includes('CLOSE') ? '#f59e0b' : 'var(--text3)';
 
-        const cashCell = `<span style="color:${h.cashFlow>=0?'var(--green)':'var(--red)'};font-weight:600">${h.cashFlow>=0?'+':'-'}$${fmt(Math.abs(h.cashFlow))}</span>`;
-        const runCell  = `<span style="color:${h.runningCash>=0?'var(--green)':'var(--red)'};font-weight:700">${h.runningCash>=0?'+':'-'}$${fmt(Math.abs(h.runningCash))}</span>`;
+        const totalCell = `<span style="font-weight:600">$${fmt(h.total)}</span>`;
 
         return `<tr>
             <td><span style="background:${stratBg};color:${stratColor};font-size:0.68rem;padding:2px 6px;border-radius:4px;white-space:nowrap">${h.strategy}</span></td>
             <td class="text-left">${legDetail}</td>
             <td style="font-weight:600">$${fmt(h.price)}</td>
-            <td>${cashCell}</td>
-            <td>${runCell}</td>
+            <td>${totalCell}</td>
             <td style="font-size:0.7rem;color:${intentColor}">${intentLabel}</td>
             <td style="color:var(--text3);font-size:0.7rem">${h.date}</td>
         </tr>`;
@@ -1529,44 +1538,27 @@ async function renderHistoryPositions(history) {
     const accountEquityChange = runningCash + unrealizedPnl;
 
     $('positions-history-wrap').innerHTML = `
-        <!-- Equity breakdown -->
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
+        <!-- Account Equity: Starting → Current → P&L -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px;padding:14px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
             <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Open Position Value</div>
-                <div style="font-weight:700;color:var(--accent2);font-size:1.05rem">$${fmt(openPositionValue)}</div>
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Starting Equity${startingDate?' ('+startingDate+')':''}</div>
+                <div style="font-weight:700;font-size:1.15rem;color:var(--text)">${startingEquity!==null?'$'+fmt(startingEquity):'—'}</div>
+                <div style="font-size:0.65rem;color:var(--text3);margin-top:3px">${startingEquity===null?'No snapshot recorded yet':'first daily snapshot'}</div>
             </div>
-            <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Margin / Loan</div>
-                <div style="font-weight:700;color:var(--red);font-size:1.05rem">-$${fmt(marginUsed)}</div>
+            <div style="border-left:2px solid var(--border);padding-left:14px">
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Current Equity</div>
+                <div style="font-weight:800;font-size:1.25rem;color:var(--accent2)">$${fmt(netEquity)}</div>
+                <div style="font-size:0.65rem;color:var(--text3);margin-top:3px">Open $${fmt(openPositionValue)} − Margin $${fmt(marginUsed)}</div>
             </div>
-            <div style="border-left:2px solid var(--border);padding-left:12px">
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Equity</div>
-                <div style="font-weight:800;color:var(--green);font-size:1.15rem">$${fmt(netEquity)}</div>
-                <div style="font-size:0.65rem;color:var(--text3);margin-top:2px">Open − Margin</div>
+            <div style="border-left:2px solid var(--border);padding-left:14px">
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Period P&L</div>
+                <div style="font-weight:800;font-size:1.25rem;color:${(periodPnl||0)>=0?'var(--green)':'var(--red)'}">${periodPnl!==null?((periodPnl>=0?'+':'-')+'$'+fmt(Math.abs(periodPnl))):'—'}</div>
+                <div style="font-size:0.65rem;color:${(periodPnl||0)>=0?'var(--green)':'var(--red)'};margin-top:3px">${periodPnlPct!==null?(periodPnlPct>=0?'+':'')+periodPnlPct.toFixed(2)+'%':''}</div>
             </div>
-            <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Unrealized P&L</div>
-                <div style="font-weight:700;color:${unrealizedPnl>=0?'var(--green)':'var(--red)'};font-size:1.05rem">${unrealizedPnl>=0?'+':'-'}$${fmt(Math.abs(unrealizedPnl))}</div>
-            </div>
-        </div>
-
-        <!-- Cash flow breakdown -->
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
-            <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Stock Bought</div>
-                <div style="font-weight:700;color:var(--red)">-$${fmt(stockBuyTotal)}</div>
-            </div>
-            <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Stock Sold (Rolls)</div>
-                <div style="font-weight:700;color:var(--green)">+$${fmt(stockSellTotal)}</div>
-            </div>
-            <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Option Premium Net</div>
-                <div style="font-weight:700;color:${optPremiumIn-optPremiumOut>=0?'var(--green)':'var(--red)'}">${optPremiumIn-optPremiumOut>=0?'+':'-'}$${fmt(Math.abs(optPremiumIn-optPremiumOut))}</div>
-            </div>
-            <div>
-                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Cash Flow</div>
-                <div style="font-weight:700;color:${runningCash>=0?'var(--green)':'var(--red)'}">${runningCash>=0?'+':'-'}$${fmt(Math.abs(runningCash))}</div>
+            <div style="border-left:2px solid var(--border);padding-left:14px">
+                <div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Unrealized P&L</div>
+                <div style="font-weight:700;font-size:1.15rem;color:${unrealizedPnl>=0?'var(--green)':'var(--red)'}">${unrealizedPnl>=0?'+':'-'}$${fmt(Math.abs(unrealizedPnl))}</div>
+                <div style="font-size:0.65rem;color:var(--text3);margin-top:3px">On open position</div>
             </div>
         </div>
         <table>
@@ -1574,20 +1566,12 @@ async function renderHistoryPositions(history) {
                 <th>Strategy</th>
                 <th class="text-left">Legs</th>
                 <th>Net Price /sh</th>
-                <th>Cash Flow</th>
-                <th>Running Cash</th>
+                <th>Total</th>
                 <th>Intent</th>
                 <th>Date</th>
             </tr></thead>
             <tbody>${rows}</tbody>
-        </table>
-        <div style="margin-top:12px;padding:10px;background:rgba(59,130,246,0.08);border-left:3px solid var(--accent2);border-radius:4px;font-size:0.75rem;color:var(--text2);line-height:1.5">
-            <strong style="color:var(--accent2)">How to read this:</strong><br>
-            • <strong>Cash Flow</strong> = actual money in/out per trade (definitive)<br>
-            • <strong>Running Cash</strong> = cumulative cash flow over the period<br>
-            • <strong>Net Cash Flow ${runningCash<0?'(red)':'(green)'}</strong> = net cash deployed (negative = capital invested still working)<br>
-            • Multi-leg combos (COVERED_STOCK, VERTICAL, CALENDAR) report the <em>net combo price</em> — individual leg P&L can't be split from the API
-        </div>`;
+        </table>`;
 }
 
 async function closePosition(id, symbol, estimatedPnl) {
