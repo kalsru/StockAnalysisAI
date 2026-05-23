@@ -1426,63 +1426,130 @@ function renderHistoryPositions(history) {
         return;
     }
 
-    // Sort oldest→newest; build open-lot lookup to find date opened for each close
-    const sorted = [...history].sort((a, b) => new Date(a.date) - new Date(b.date));
-    const openLots = {}; // key → [{date, price}]
-    for (const h of sorted) {
-        if (!h.action) continue;
-        const isOption = !!h.optionType;
-        const key = `${h.symbol}|${h.optionType||''}|${h.strike||''}|${h.expiry||''}`;
-        const isOpen = isOption ? h.action === 'SELL' : h.action === 'BUY';
-        if (!openLots[key]) openLots[key] = [];
-        if (isOpen) openLots[key].push({ date: h.date, price: h.price });
-    }
-
-    // Second pass: annotate each close with its open-lot date & compute realized P&L
-    const usedLots = {};
-    let runningEquity = 0;
-    const annotated = sorted.map(h => {
-        if (!h.action) return { ...h, openDate: null, realizedPnl: null, runningEquity: 0 };
-        const isOption = !!h.optionType;
-        const key = `${h.symbol}|${h.optionType||''}|${h.strike||''}|${h.expiry||''}`;
-        const isClose = isOption ? h.action === 'BUY' : h.action === 'SELL';
-        if (!usedLots[key]) usedLots[key] = 0;
-
-        let openDate = null, realizedPnl = null;
-        if (isClose && openLots[key] && usedLots[key] < openLots[key].length) {
-            const lot = openLots[key][usedLots[key]++];
-            openDate = lot.date;
-            const mult = isOption ? 100 : 1;
-            // Options: opened by SELL (collect premium), closed by BUY (pay premium)
-            // Stock:   opened by BUY (cost), closed by SELL (proceeds)
-            realizedPnl = isOption
-                ? parseFloat(((lot.price - h.price) * h.qty * mult).toFixed(2))
-                : parseFloat(((h.price - lot.price) * h.qty * mult).toFixed(2));
-            runningEquity += realizedPnl;
+    // Categorize each trade
+    // price > $30 in an optionType record = stock ASSIGNMENT at strike price (not premium)
+    const STOCK_PRICE_THRESHOLD = 30;
+    const categorized = history.map(h => {
+        let tradeType, shares;
+        if (!h.optionType) {
+            tradeType = 'STOCK';
+            shares = h.qty;
+        } else if (h.price > STOCK_PRICE_THRESHOLD) {
+            tradeType = 'ASSIGNMENT';    // stock called away / exercised at strike
+            shares = h.qty * 100;        // contracts → shares
+        } else {
+            tradeType = 'OPTION';        // regular covered call premium
+            shares = h.qty;              // contracts
         }
-        return { ...h, openDate, realizedPnl, runningEquity };
+        // Total is pre-computed correctly in backend (qty × price × multiplier)
+        return { ...h, tradeType, shares };
     });
 
-    // Display newest first
-    const rows = [...annotated].reverse().map(h => {
-        const isOption = !!h.optionType;
-        const detail = isOption
-            ? `${h.optionType} $${h.strike}${h.expiry?' exp '+h.expiry:''}`
-            : 'STOCK';
+    // Sort oldest→newest for running totals
+    const byDate = [...categorized].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    // Track stock lots per symbol for P&L pairing (FIFO)
+    const stockLots = {}; // symbol → [{price, shares, date}]
+
+    // Track option open lots per symbol+expiry for P&L pairing
+    const optionLots = {}; // symbol+expiry → [{price, qty, date}]
+
+    let runningPnl = 0;
+    const withPnl = byDate.map(h => {
+        const sym = h.symbol;
+        let tradePnl = null, openDate = null;
+
+        if (h.tradeType === 'STOCK') {
+            if (h.action === 'BUY') {
+                if (!stockLots[sym]) stockLots[sym] = [];
+                stockLots[sym].push({ price: h.price, shares: h.shares, date: h.date });
+            }
+            // Stock BUY = capital deployment, P&L tracked when sold via ASSIGNMENT
+        } else if (h.tradeType === 'ASSIGNMENT') {
+            // Stock sold at strike — match against stock lots
+            if (!stockLots[sym]) stockLots[sym] = [];
+            let remaining = h.shares;
+            let costBasis = 0, costShares = 0;
+            while (remaining > 0 && stockLots[sym].length) {
+                const lot = stockLots[sym][0];
+                const take = Math.min(remaining, lot.shares);
+                costBasis += take * lot.price;
+                costShares += take;
+                remaining -= take;
+                lot.shares -= take;
+                if (!openDate) openDate = lot.date;
+                if (lot.shares <= 0) stockLots[sym].shift();
+            }
+            if (costShares > 0) {
+                tradePnl = parseFloat(((h.price - (costBasis / costShares)) * costShares).toFixed(2));
+                runningPnl += tradePnl;
+            }
+        } else if (h.tradeType === 'OPTION') {
+            const key = `${sym}|${h.expiry||''}`;
+            if (!optionLots[key]) optionLots[key] = [];
+            if (h.action === 'SELL') {
+                // Sell to open — record lot
+                optionLots[key].push({ price: h.price, qty: h.qty, date: h.date });
+            } else if (h.action === 'BUY' && optionLots[key].length) {
+                // Buy to close — match against open sell lot (FIFO)
+                let remaining = h.qty;
+                let totalReceived = 0, totalQty = 0;
+                while (remaining > 0 && optionLots[key].length) {
+                    const lot = optionLots[key][0];
+                    const take = Math.min(remaining, lot.qty);
+                    totalReceived += take * lot.price;
+                    totalQty += take;
+                    remaining -= take;
+                    lot.qty -= take;
+                    if (!openDate) openDate = lot.date;
+                    if (lot.qty <= 0) optionLots[key].shift();
+                }
+                if (totalQty > 0) {
+                    tradePnl = parseFloat(((totalReceived / totalQty - h.price) * h.qty * 100).toFixed(2));
+                    runningPnl += tradePnl;
+                }
+            }
+        }
+
+        return { ...h, tradePnl, openDate, runningPnl };
+    });
+
+    // Summary stats
+    const totalOptPremium = categorized.filter(h => h.tradeType === 'OPTION' && h.action === 'SELL')
+        .reduce((s, h) => s + h.total, 0);
+    const totalOptCost    = categorized.filter(h => h.tradeType === 'OPTION' && h.action === 'BUY')
+        .reduce((s, h) => s + h.total, 0);
+    const totalStockIn    = categorized.filter(h => h.tradeType === 'STOCK' && h.action === 'BUY')
+        .reduce((s, h) => s + h.total, 0);
+    const totalAssigned   = categorized.filter(h => h.tradeType === 'ASSIGNMENT')
+        .reduce((s, h) => s + h.total, 0);
+    const netCapital      = totalStockIn - totalAssigned; // still-deployed capital
+    const netPremium      = totalOptPremium - totalOptCost;
+
+    // Build rows (newest first)
+    const rows = [...withPnl].reverse().map(h => {
+        const typeLabel = h.tradeType === 'ASSIGNMENT' ? 'ASSIGNMENT'
+            : h.tradeType === 'OPTION' ? `${h.optionType||'OPTION'}${h.expiry?' '+h.expiry:''}` : 'STOCK';
+        const typeBg = h.tradeType === 'ASSIGNMENT' ? 'rgba(139,92,246,0.15)'
+            : h.tradeType === 'OPTION' ? 'rgba(59,130,246,0.15)' : 'rgba(16,185,129,0.15)';
+        const typeClr = h.tradeType === 'ASSIGNMENT' ? '#a78bfa'
+            : h.tradeType === 'OPTION' ? '#60a5fa' : 'var(--green)';
         const aBg  = h.action === 'BUY' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
         const aClr = h.action === 'BUY' ? 'var(--green)' : 'var(--red)';
-        const pnlCell = h.realizedPnl !== null
-            ? `<span style="color:${h.realizedPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.realizedPnl>=0?'+':''}$${fmt(Math.abs(h.realizedPnl))}</span>`
-            : '—';
-        const runCell = h.realizedPnl !== null
-            ? `<span style="color:${h.runningEquity>=0?'var(--green)':'var(--red)'};font-weight:700">${h.runningEquity>=0?'+':''}$${fmt(Math.abs(h.runningEquity))}</span>`
+        const sharesDisplay = h.tradeType === 'ASSIGNMENT' ? `${h.shares} sh` : h.qty;
+        const pnlCell = h.tradePnl !== null
+            ? `<span style="color:${h.tradePnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.tradePnl>=0?'+':''}$${fmt(Math.abs(h.tradePnl))}</span>`
+            : '<span style="color:var(--text3)">—</span>';
+        const runCell = h.tradePnl !== null
+            ? `<span style="color:${h.runningPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${h.runningPnl>=0?'+':''}$${fmt(Math.abs(h.runningPnl))}</span>`
             : '';
         return `<tr>
             <td class="text-left"><strong>${h.symbol}</strong></td>
             <td><span class="badge" style="background:${aBg};color:${aClr};font-size:0.7rem">${h.action}</span></td>
-            <td class="text-left" style="color:var(--text2);font-size:0.75rem">${detail}</td>
-            <td style="color:var(--text2)">${h.qty}</td>
+            <td><span style="background:${typeBg};color:${typeClr};font-size:0.68rem;padding:2px 6px;border-radius:4px">${typeLabel}</span></td>
+            <td style="color:var(--text2)">${sharesDisplay}</td>
             <td style="font-weight:600">$${fmt(h.price)}</td>
+            <td style="color:var(--text2)">$${fmt(h.total)}</td>
             <td>${pnlCell}</td>
             <td>${runCell}</td>
             <td style="color:var(--text3);font-size:0.75rem">${h.openDate||'—'}</td>
@@ -1490,21 +1557,35 @@ function renderHistoryPositions(history) {
         </tr>`;
     }).join('');
 
+    const finalRunning = withPnl[withPnl.length - 1]?.runningPnl || 0;
+
     $('positions-history-wrap').innerHTML = `
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;padding:12px;background:var(--card);border-radius:8px;border:1px solid var(--border)">
+            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Capital Deployed</div>
+                <div style="font-weight:700;color:var(--red)">-$${fmt(netCapital)}</div></div>
+            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Net Premium</div>
+                <div style="font-weight:700;color:${netPremium>=0?'var(--green)':'var(--red)'}">${netPremium>=0?'+':''}$${fmt(netPremium)}</div></div>
+            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Realized P&L</div>
+                <div style="font-weight:700;color:${finalRunning>=0?'var(--green)':'var(--red)'}">${finalRunning>=0?'+':''}$${fmt(Math.abs(finalRunning))}</div></div>
+            <div><div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase;margin-bottom:2px">Unrealized P&L</div>
+                <div style="font-weight:700;color:var(--green)" id="hist-unrealized">Loading…</div></div>
+        </div>
         <table>
             <thead><tr>
-                <th class="text-left">Symbol</th>
-                <th>Action</th>
-                <th class="text-left">Detail</th>
-                <th>Qty</th>
-                <th>Price</th>
-                <th>Trade P&L</th>
-                <th>Running Equity</th>
-                <th>Date Opened</th>
-                <th>Date Closed</th>
+                <th class="text-left">Symbol</th><th>Action</th><th>Type</th><th>Qty</th>
+                <th>Price</th><th>Total</th><th>Trade P&L</th><th>Running P&L</th>
+                <th>Date Opened</th><th>Date</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>`;
+
+    // Fill unrealized P&L from open positions
+    if (_chatPositions.length) {
+        const unreal = _chatPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+        const el = document.getElementById('hist-unrealized');
+        if (el) el.textContent = `${unreal>=0?'+':''}$${fmt(Math.abs(unreal))}`;
+        if (el) el.style.color = unreal >= 0 ? 'var(--green)' : 'var(--red)';
+    }
 }
 
 async function closePosition(id, symbol, estimatedPnl) {
